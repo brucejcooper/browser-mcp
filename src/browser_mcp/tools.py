@@ -257,8 +257,19 @@ class Service:
         try:
             response = await page.goto(url, referer=referer, wait_until="domcontentloaded")
         except PlaywrightError as e:
+            await self._blank(page)
             self._failed(e, started, caller, tool, url)
         return await self._settle(page, url, response, caller, tool)
+
+    async def _blank(self, page: Page) -> None:
+        """After a failed load: off Firefox's error page, which can load the
+        failed URL again by itself and cut across the next call's page."""
+        for _ in range(3):
+            try:
+                await page.goto("about:blank", timeout=5000)
+                return
+            except PlaywrightError:
+                await asyncio.sleep(0.5)
 
     async def _search_box(self, page: Page, start_url: str, selectors: list[str], query: str,
                           caller: str, tool: str) -> PageResult:
@@ -298,7 +309,9 @@ class Service:
         finally:
             page.remove_listener("response", on_response)
         if page.url.startswith("about:neterror") or (not responses and page.url == here):
-            self._failed_page(page, here, caller, tool)
+            at = page.url
+            await self._blank(page)
+            self._failed_page(at, here, caller, tool)
         return await self._settle(page, here, responses[-1] if responses else None, caller, tool)
 
     async def _left(self, page: Page, url: str, timeout: float) -> bool:
@@ -308,16 +321,16 @@ class Service:
         except PlaywrightTimeout:
             return False
 
-    def _failed_page(self, page: Page, url: str, caller: str, tool: str):
+    def _failed_page(self, at: str, url: str, caller: str, tool: str):
         """A submitted search that didn't load: say why, as goto's errors do."""
         refusals = self.egress.refusals_since(time.monotonic() - 120)
         if refusals:
             host, why = refusals[-1]
             self.pagelog.page(caller=caller, tool=tool, url=url, outcome="refused:network", detail=why)
             raise ToolRefused(f"refused: the search went to {host}: {why}")
-        self.pagelog.page(caller=caller, tool=tool, url=url, final_url=page.url, outcome="error",
+        self.pagelog.page(caller=caller, tool=tool, url=url, final_url=at, outcome="error",
                           detail="the search didn't submit")
-        raise ToolRefused(f"the search didn't load a results page (the tab is at {page.url})")
+        raise ToolRefused(f"the search didn't load a results page (the tab was at {at})")
 
     async def _find_input(self, page: Page, selectors: list[str], wait: bool):
         deadline = time.monotonic() + (8 if wait else 0)

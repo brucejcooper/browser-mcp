@@ -164,6 +164,8 @@ async def test_without_the_ca_a_clear_certificate_error(tmp_path, mitm, origin):
     try:
         with pytest.raises(ToolRefused, match=r"certificate error \(\w+\).*--ca-file"):
             await svc.browse(origin.base + "/page", "t")
+        # Off the error page, so it can't load the URL again under the next call.
+        assert (await svc.browser.page()).url == "about:blank"
         with pytest.raises(ToolRefused, match=r"certificate error"):
             await svc.search("ddr4", "t", "local")
     finally:
