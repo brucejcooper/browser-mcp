@@ -1,0 +1,47 @@
+# browser-mcp with Docker Compose. After `docker load` of a release tarball:
+#
+#   openssl rand -hex 32 > token          # the bearer token
+#   cp examples/config.toml config.toml   # and edit it
+#   mkdir -p certs                        # your proxy's root CA, if it inspects TLS
+#   docker compose up -d
+#
+# It serves streamable HTTP at http://127.0.0.1:8080/mcp, on this machine
+# only, and every request needs "Authorization: Bearer <token>".
+services:
+  browser-mcp:
+    image: browser-mcp:${BROWSER_MCP_VERSION:-0.1.0}
+    command: ["--transport", "http", "--host", "0.0.0.0", "--port", "8080", "--config", "/config/config.toml"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # The proxy: from the shell that runs compose. A proxy on the host
+      # itself (px, cntlm) is host.docker.internal from inside, e.g.
+      # HTTPS_PROXY=http://host.docker.internal:3128
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      BROWSER_MCP_PROXY_USER: ${BROWSER_MCP_PROXY_USER:-}
+      # Extra CA files to trust, colon-separated, under the certs mount,
+      # e.g. /certs/proxy-root.pem.
+      BROWSER_MCP_CA_FILES: ${BROWSER_MCP_CA_FILES:-}
+      BROWSER_MCP_TOKEN_FILE: /run/secrets/browser-mcp-token
+      BROWSER_MCP_LOG_FILE: /logs/pages.log
+      TZ: ${TZ:-UTC}
+    volumes:
+      - profile:/state
+      - logs:/logs
+      - ./config.toml:/config/config.toml:ro
+      - ./certs:/certs:ro
+    secrets:
+      - browser-mcp-token
+    # Firefox wants more shared memory than Docker's 64 MB default.
+    shm_size: 1gb
+    restart: unless-stopped
+
+secrets:
+  browser-mcp-token:
+    file: ./token
+
+volumes:
+  profile:
+  logs:

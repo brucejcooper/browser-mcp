@@ -1,0 +1,83 @@
+# browser-mcp's configuration. Every setting is optional; these are the
+# defaults unless a comment says otherwise. See the README's config reference.
+
+state_dir = "./state"     # the browser profile and the limits' counters
+transport = "stdio"       # or "http"
+
+[browser]
+locale = "en-US"          # also the Accept-Language
+timezone = ""             # an IANA name, e.g. "Europe/Berlin"; empty: the host's
+screen_width = 1920
+screen_height = 1080
+idle_timeout = 600        # seconds without a call before the browser closes
+display = ""              # an existing X display instead of the server's own Xvfb
+navigation_timeout = 45
+challenge_wait = 25       # seconds to wait out an interstitial ("Just a moment...")
+checkbox_wait = 15        # seconds for a clicked checkbox widget to clear
+
+[output]
+max_text = 30000
+max_links = 200
+max_results = 20
+
+[limits]
+delay_min = 2.0           # seconds between page actions, jittered
+delay_max = 3.0
+per_site_per_day = 250    # per registrable domain
+per_day = 1000
+per_caller_per_hour = 50
+
+[deny]
+# words = [...]           # the URL deny list; the default refuses login,
+                          # account, cart, checkout, bid, buy, offer and so on
+patterns = []             # regexes on the whole URL, refused too
+# networks = [...]        # the default: loopback, RFC 1918, CGNAT, link-local, ULA
+unresolvable_via_proxy = false
+
+[proxy]
+url = ""                  # empty: HTTPS_PROXY / HTTP_PROXY
+no_proxy = ""             # empty: NO_PROXY
+username = ""             # or BROWSER_MCP_PROXY_USER, or in the proxy URL
+password_file = ""        # or BROWSER_MCP_PROXY_PASSWORD_FILE
+
+[tls]
+ca_files = []             # extra CAs to trust, e.g. ["/certs/proxy-root.pem"]
+
+[log]
+file = ""                 # one JSON line per page; empty: stderr
+
+[metrics]
+enabled = false           # /metrics on the HTTP port
+textfile = ""             # or a node_exporter textfile
+
+[http]
+host = "127.0.0.1"        # any other bind needs token_file
+port = 8080
+path = "/mcp"
+token_file = ""
+caller_header = "X-Caller-Id"
+
+[stdio]
+caller = "stdio"
+
+[search]
+default = "duckduckgo"    # also built in: bing, google, brave
+
+# A search engine of your own: its start page, its search box, and where the
+# results are (CSS selectors).
+# [engines.example]
+# url = "https://search.example.com/"
+# input = 'input[name="q"]'
+# result = "li.result"
+# title = "h3"
+# link = "a[href]"
+# snippet = "p"
+
+# Sites for site_search: a start page and its search box. A site that isn't
+# listed uses its home page's first search box.
+[sites.wikipedia]
+url = "https://en.wikipedia.org/"
+input = 'input[name="search"]'
+
+[sites.archive]
+url = "https://archive.org/"

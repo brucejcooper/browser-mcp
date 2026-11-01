@@ -1,0 +1,55 @@
+# The tests, gitleaks, the package and both images; and a release when main's
+# version (pyproject.toml) has none yet.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci
+  cancel-in-progress: false
+
+jobs:
+  test:
+    # Only ever from main (D45): dispatched on another ref, it runs nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: nix
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: The package (with its unit tests) and the NixOS module
+        run: nix build -L --no-link .#packages.x86_64-linux.default .#checks.x86_64-linux.module
+      - name: All the tests, the browser ones too (Firefox under Xvfb, mitmproxy)
+        run: nix develop -c python -m pytest -q -m "not live"
+
+  gitleaks:
+    if: github.ref == 'refs/heads/main'
+    runs-on: nix
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: nix run nixpkgs#gitleaks -- git --no-banner --redact --verbose .
+
+  images:
+    if: github.ref == 'refs/heads/main'
+    runs-on: nix
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      # aarch64 builds under QEMU on the runner; Firefox and Python come
+      # prebuilt from cache.nixos.org.
+      - run: nix build -L --no-link .#packages.x86_64-linux.image .#packages.aarch64-linux.image
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: [test, gitleaks, images]
+    runs-on: nix
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Release v<version>, if it isn't yet
+        env:
+          # The job's own token: write on this repo while the job runs.
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+        run: nix develop .#release -c scripts/release.sh

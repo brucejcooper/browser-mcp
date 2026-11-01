@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-mcp"
+version = "0.1.0"
+description = "An MCP server that browses and searches the web in a real Firefox"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.20",
+  "playwright>=1.50",
+  "tldextract>=5",
+  "prometheus-client>=0.20",
+  "uvicorn>=0.30",
+  "starlette>=0.40",
+]
+
+[project.scripts]
+browser-mcp = "browser_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+browser_mcp = ["*.js"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "browser: needs Firefox, Xvfb and certutil (the dev shell has them)",
+  "live: reaches real sites on the internet; run by hand",
+]
+addopts = "-m 'not live'"
