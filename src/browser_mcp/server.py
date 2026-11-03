@@ -1,4 +1,4 @@
-"""The MCP server: the three tools, over stdio or streamable HTTP."""
+"""The MCP server: the tools, over stdio or streamable HTTP."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import ipaddress
 import json
 import logging
 from pathlib import Path
+from typing import Annotated, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ImageContent, TextContent, ToolAnnotations
+from pydantic import Field
 
 from .browser import Browser
 from .config import Config
@@ -26,8 +28,10 @@ log = logging.getLogger(__name__)
 
 INSTRUCTIONS = f"""Browses and searches the web in a real Firefox, for occasional lookups
 (prices, listings, stock): a few pages at a time, not crawling. There is no
-click, type or form tool: no logins, accounts or purchases. Pages are limited
-per site, per day and per caller; a refusal says when it frees up. {UNTRUSTED}"""
+general click, type or form tool: no logins, accounts or purchases. The
+challenge tool clicks and types only inside a bot challenge's widget, and only
+while a page is stopped at one. Pages are limited per site, per day and per
+caller; a refusal says when it frees up. {UNTRUSTED}"""
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True, idempotentHint=False)
 
@@ -55,7 +59,7 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             return (request.headers.get(cfg.http.caller_header) or "http").strip()[:200]
         return cfg.stdio.caller
 
-    def text(obj) -> TextContent:
+    def text_content(obj) -> TextContent:
         return TextContent(type="text", text=json.dumps(obj, ensure_ascii=False, indent=1))
 
     def image(b64: str | None) -> list[ImageContent]:
@@ -75,7 +79,7 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             r = await service.browse(url, caller_of(ctx), screenshot=screenshot)
         except ToolRefused as e:
             raise ToolError(str(e)) from None
-        return [text(r.as_dict()), *image(r.screenshot)]
+        return [text_content(r.as_dict()), *image(r.screenshot)]
 
     engines = ", ".join(sorted(cfg.engines))
 
@@ -91,7 +95,7 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             out, shot = await service.search(query, caller_of(ctx), engine)
         except ToolRefused as e:
             raise ToolError(str(e)) from None
-        return [text(out), *image(shot)]
+        return [text_content(out), *image(shot)]
 
     sites = ", ".join(sorted(cfg.sites)) or "none configured"
 
@@ -107,7 +111,36 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             r = await service.site_search(site, query, caller_of(ctx))
         except ToolRefused as e:
             raise ToolError(str(e)) from None
-        return [text({"site": site, "query": query, **r.as_dict()}), *image(r.screenshot)]
+        return [text_content({"site": site, "query": query, **r.as_dict()}), *image(r.screenshot)]
+
+    @mcp.tool(
+        name="challenge", structured_output=False,
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True),
+        description=(
+            "Get past a bot challenge that the last page load (browse, search or site_search) stopped at, "
+            "and that the server couldn't pass itself. Refused when there is none. First try it yourself: "
+            "`screenshot` returns the challenge's widget (its frame, e.g. an image grid) and the frame's box; "
+            "`click` with x and y, relative to the frame's top left in the screenshot's pixels (a click "
+            "outside the frame is refused), clicks it along a human-like mouse path; `type` with text "
+            "types into the text input focused inside the frame (click it first). Each click or type "
+            "returns whether the challenge is still there, with a new screenshot. If you can't solve it, "
+            "`ask_human` opens a short-lived live view of the browser and returns its one-time link and "
+            "expiry: show the link to the user. `resume`, once the challenge is gone, returns the page as "
+            "`browse` does (while a person is still at it, it says so). A hand-off that times out fails, "
+            "and that site is left alone for the rest of the day. No paid or third-party solvers are used. "
+            f"{UNTRUSTED}"))
+    async def challenge(
+        action: Literal["screenshot", "click", "type", "ask_human", "resume"],
+        x: Annotated[float | None, Field(description="click: from the frame's left, in pixels")] = None,
+        y: Annotated[float | None, Field(description="click: from the frame's top, in pixels")] = None,
+        text: Annotated[str | None, Field(description="type: the text to type")] = None,
+        ctx: Context = None,
+    ) -> list:
+        try:
+            out, shot = await service.challenge(action, caller_of(ctx), x=x, y=y, text=text)
+        except ToolRefused as e:
+            raise ToolError(str(e)) from None
+        return [text_content(out), *image(shot)]
 
     return mcp, service
 

@@ -60,6 +60,16 @@ caller_header = "X-Caller-Id"
 [stdio]
 caller = "stdio"
 
+[view]
+# The live view a person solves a challenge in (challenge's ask_human).
+mode = "local"            # local: 127.0.0.1 and the link's token; proxied: behind an authenticating proxy
+host = "127.0.0.1"        # proxied only: where the proxy reaches it
+port = 0                  # 0: any free port (local only; proxied needs a fixed one)
+public_url = ""           # proxied: the root of the proxy's host for the view, e.g. "https://view.example.org/"
+user_header = ""          # proxied: the header naming the user, e.g. "X-authentik-username"
+timeout = 600             # seconds before an unfinished hand-off fails
+novnc_dir = ""            # empty: BROWSER_MCP_NOVNC_DIR (the Nix package and the image set it)
+
 [search]
 default = "duckduckgo"    # also built in: bing, google, brave
 

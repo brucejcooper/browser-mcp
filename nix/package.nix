@@ -5,6 +5,8 @@
   python3Packages,
   playwright-driver,
   xvfb,
+  x11vnc,
+  novnc,
   nss,
   makeFontsConf,
   dejavu_fonts,
@@ -30,11 +32,14 @@ let
   runtimeTools = [
     xvfb
     nss.tools
+    # The live view a person solves a challenge in.
+    x11vnc
   ];
   runtimeEnv = {
     PLAYWRIGHT_BROWSERS_PATH = "${browsers}";
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1";
     FONTCONFIG_FILE = "${fontsConf}";
+    BROWSER_MCP_NOVNC_DIR = "${novnc}/share/webapps/novnc";
   };
 in
 python3Packages.buildPythonApplication {
@@ -62,11 +67,13 @@ python3Packages.buildPythonApplication {
     prometheus-client
     uvicorn
     starlette
+    wsproto
   ];
 
   nativeCheckInputs = with python3Packages; [
     pytestCheckHook
     pytest-asyncio
+    websockets # the live view's tests' client
   ];
   # The browser tests need a display and run in CI's dev shell instead.
   disabledTestMarks = [

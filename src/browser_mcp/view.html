@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>browser-mcp: solve the challenge</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #222; color: #eee; font: 15px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 1em; align-items: center; padding: .5em 1em; background: #333; }
+  header p { margin: 0; flex: 1; }
+  button { font: inherit; padding: .4em 1.2em; border: 0; border-radius: 4px; background: #2a7; color: #fff; cursor: pointer; }
+  button:disabled { background: #555; cursor: default; }
+  #screen { flex: 1; overflow: hidden; }
+</style>
+</head>
+<body>
+<header>
+  <p id="status">The browser is stopped at {{WHAT}}. Solve it here, then press Done.
+    This view closes by itself once the challenge clears, or at <span id="expires"></span>.</p>
+  <button id="done" type="button">Done</button>
+</header>
+<div id="screen"></div>
+<script type="module" nonce="{{NONCE}}">
+import RFB from './novnc/core/rfb.js';
+
+const expires = new Date({{EXPIRES}});
+const status = document.getElementById('status');
+const done = document.getElementById('done');
+document.getElementById('expires').textContent = expires.toLocaleTimeString();
+
+const ws = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + location.pathname + 'websockify';
+const rfb = new RFB(document.getElementById('screen'), ws, { wsProtocols: ['binary'] });
+rfb.scaleViewport = true;
+rfb.focusOnClick = true;
+
+let ended = false;
+function end(text) {
+  ended = true;
+  done.disabled = true;
+  status.textContent = text;
+}
+rfb.addEventListener('disconnect', () => {
+  if (!ended) end('The view has closed. You can close this tab.');
+});
+done.addEventListener('click', async () => {
+  end('Done. You can close this tab.');
+  try { await fetch('done', { method: 'POST' }); } finally { rfb.disconnect(); }
+});
+setTimeout(() => { if (!ended) end('The time for this view is up. You can close this tab.'); rfb.disconnect(); },
+           Math.max(0, expires - Date.now()));
+</script>
+</body>
+</html>

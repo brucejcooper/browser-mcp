@@ -8,19 +8,21 @@ stock), a few pages at a time.
 **What it isn't:**
 - **Not a crawler.** Every page counts against limits per site, per day and
   per caller, and the pages are paced.
-- **Not a way to act on sites.** It has no click, type or form tool, so no
-  logins, accounts, bids or purchases, and a URL deny list refuses those pages
-  outright.
-- **Not a CAPTCHA solver.** It waits out interstitials and clicks a
-  checkbox. Anything harder is reported back as a `challenge`. It never uses
-  paid solver services or third-party solver APIs.
+- **Not a way to act on sites.** It has no general click, type or form tool,
+  so no logins, accounts, bids or purchases, and a URL deny list refuses those
+  pages outright. The one tool that clicks, `challenge`, acts only inside a
+  bot challenge's widget, and only while a page is stopped at one.
+- **Not a CAPTCHA-solving service.** It waits out interstitials and clicks a
+  checkbox. Anything harder goes to the client (the model reads the image
+  challenge), then to a person in a live view. It never uses paid solver
+  services or third-party solver APIs. See [Challenges](#challenges).
 
 It runs over stdio (for a local Claude Code) or streamable HTTP. It is packaged
 from one Nix flake as a NixOS module and as a Docker image for `linux/amd64`
 and `linux/arm64`. Both use the same Firefox build.
 
 **Contents:** [Tools](#tools) · [Running it](#running-it) ·
-[Configuration](#configuration) · [Proxy and CA](#behind-a-proxy-and-a-tls-inspecting-ca) ·
+[Configuration](#configuration) · [Challenges](#challenges) · [Proxy and CA](#behind-a-proxy-and-a-tls-inspecting-ca) ·
 [Guardrails](#guardrails) · [How it passes as a person](#how-it-passes-as-a-person) ·
 [Survey](#survey-what-exists-and-why-this-is-built-the-way-it-is) ·
 [The risk](#the-risk) · [Development](#development)
@@ -32,6 +34,7 @@ and `linux/arm64`. Both use the same Firefox build.
 | `browse(url, screenshot?)` | Loads the page. Returns the final URL, the status and the title, the visible text (up to 30,000 characters), the links (up to 200, the page's own before its menus, without tracking parameters) and, if asked, a screenshot. If a challenge stops it, it returns `challenge` with its kind and a screenshot of the widget instead. | 1 |
 | `search(query, engine?)` | Types the query into a search engine's own page and returns the results: title, URL and snippet. DuckDuckGo is the default; Bing, Google and Brave are built in, and others can be configured. | 2 |
 | `site_search(site, query)` | Types the query into a site's own search box and returns the results page, as `browse` does. `site` is a configured recipe or any host name. For a host name, the first search box on its home page is used. | 2 |
+| `challenge(action, x?, y?, text?)` | Acts on the challenge the last page load stopped at, and on nothing else: `screenshot`, `click`, `type`, `ask_human`, `resume`. See [Challenges](#challenges). | 0 |
 
 The two search tools load the start page and then the results page. When the
 tab is already on that site and its search box is there, they type into it
@@ -160,12 +163,100 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 | `http.token_file` | | The bearer token, at least 16 characters. Any bind but loopback refuses to start without it. `--token-file`, `BROWSER_MCP_TOKEN_FILE`. |
 | `http.caller_header` | `X-Caller-Id` | The request header naming the caller, for the per-caller limit and the log. |
 | `stdio.caller` | `stdio` | The caller over stdio. `--caller`. |
+| `view.mode` | `local` | The live view's mode: `local` or `proxied`. See [the live view](#2-a-person-in-the-live-view). |
+| `view.host`, `port` | `127.0.0.1`, 0 | Where the live view listens. `local` always binds `127.0.0.1`; port 0 is any free port. `proxied` needs a fixed port. |
+| `view.public_url` | | `proxied`: the proxy's URL for the view, the base of the link handed out. It must be the root of its own host (`https://view.example.org/`), not a path under another site. |
+| `view.user_header` | | `proxied`: the request header the proxy names the authenticated user in, e.g. `X-authentik-username`. A request without it is refused. |
+| `view.timeout` | 600 | Seconds before an unfinished hand-off closes and fails. |
+| `view.novnc_dir` | `BROWSER_MCP_NOVNC_DIR` | noVNC's files (the directory with `core/rfb.js`). The Nix package and the image set it. |
 | `search.default` | `duckduckgo` | The engine `search` uses when none is named. |
 | `engines.<name>` | duckduckgo, bing, google, brave | `url` (the start page), `input` (the search box), and `result`, `title`, `link` and `snippet` (CSS selectors for the results). If `result` matches nothing, links holding a heading are taken instead. |
 | `sites.<name>` | | `url` (the start page) and `input` (the search box; empty means the first search box). |
 
 The example config's sites are neutral (Wikipedia, the Internet Archive). A
 deployment adds its own.
+
+## Challenges
+
+When a page stops at a bot challenge, the server first tries the trivial ways
+past it: it waits out an interstitial, and clicks a checkbox widget (see
+[How it passes as a person](#how-it-passes-as-a-person)). A widget whose
+response token gets filled in counts as passed. What's left comes back from
+`browse`, `search` or `site_search` as `challenge`, with its kind and a
+screenshot, and there are two ways on, in this order.
+
+### 1. The client answers it
+
+The model reads the image challenge and acts, with `challenge(action)`:
+
+| Action | What it does |
+|---|---|
+| `screenshot` | The widget: the largest visible frame of the challenge's kind, so an image challenge's frame once it has opened, else the checkbox's. With the frame's box. |
+| `click {x, y}` | Clicks at `x`, `y` relative to the frame's top left, in the screenshot's pixels, along a human-like mouse path. A click outside the frame's box is refused. Returns whether the challenge is still there, with a new screenshot. |
+| `type {text}` | Types (up to 100 characters, with a human rhythm) into the text input that has the focus inside the frame; click it first. Anywhere else is refused. |
+| `ask_human` | Opens the live view (below) and returns its link and expiry. Once per challenge. |
+| `resume` | Once the challenge is gone, returns the page as `browse` does. While a person is still at it, it says so. |
+
+It is held to the challenge so it can't become a general click tool:
+- every action is refused unless the last page load stopped at a challenge
+  that is still pending; the next page load ends it;
+- only the caller that met the challenge may act on it;
+- interstitials and block pages have no widget, so only `ask_human` and
+  `resume` work on them;
+- every action, refusals too, is a line in the page log (`tool: challenge`,
+  with the `action` and its `outcome`; what was typed is not logged, only its
+  length), and is counted in `browser_mcp_challenge_actions`.
+
+Clicks and typing don't count against the page limits; a page the challenge
+lets through was counted when it was asked for.
+
+### 2. A person, in the live view
+
+`ask_human` opens a short-lived live view of the browser's own display: x11vnc
+on the server's Xvfb, which shows only this browser, and noVNC's page in front
+of it, with a Done button. Nothing of it runs until `ask_human`, and nothing
+is left listening after:
+- x11vnc listens on a Unix socket in a private directory, with no TCP port at
+  all (`-rfbport 0 -rfbportv6 -1`);
+- the view's own web server bridges noVNC's WebSocket to that socket, and
+  stops with the view.
+
+**It closes itself**, and the hand-off ends, when the person presses Done,
+when the challenge detector sees the challenge clear, or when `view.timeout`
+(default 10 minutes) passes. Meanwhile the other tools are refused: the
+browser is the person's.
+
+**The link** carries a random token, good for this challenge only and for one
+session. The first open takes it and sets a cookie (`HttpOnly`,
+`SameSite=Strict`); everything else needs that cookie. A second open, from
+anywhere else, is refused, as is another challenge's token.
+
+**The modes** (`view.mode`):
+- `local` (the default) binds `127.0.0.1`, on any free port, and checks the
+  token. It is for a laptop: the link goes back to the client, and Claude Code
+  shows it to the user. From inside the Docker image, `127.0.0.1` is the
+  container's own, so the link isn't reachable from the host there: use the
+  Nix package, or `proxied`.
+- `proxied` binds `view.host` and `view.port`, and expects an authenticating
+  reverse proxy in front, which the deployment provides. Every request needs
+  the header the proxy names its user in (`view.user_header`), and the token
+  as well; the first user to open the link is the only one who may use it. The
+  link is built on `view.public_url`. Bind it where only the proxy can reach
+  it: the header is trusted as it comes.
+
+**If it isn't solved**, the challenge is reported as failed, and the site is
+left alone for the rest of the day: until local midnight, every page on it is
+refused, across restarts. That happens when the view times out, or when the
+person presses Done with the challenge still there.
+
+**Never:** paid solver services, or third-party solver accounts or APIs.
+Audio challenges aren't handled.
+
+**The risk.** Solving a challenge is the clearest case of getting past a bot
+check, and what's at stake is the same as in [The risk](#the-risk): the
+reputation of the IP address the browser goes out from. A live view is a
+remote control of the browser for whoever holds the link: hand it only to the
+user, keep `proxied` behind the proxy, and keep the timeout short.
 
 ## Behind a proxy and a TLS-inspecting CA
 
@@ -261,7 +352,8 @@ All of these are in code, with their values in config.
   - Interstitials are waited out.
   - A checkbox widget is clicked along a human-like path.
   - Anything else comes back as `challenge` (its kind, and a screenshot of
-    the widget) for the caller to decide.
+    the widget), for the client or a person to solve (see
+    [Challenges](#challenges)).
   - A widget on an ordinary page (reCAPTCHA v3, a form's hCaptcha) isn't
     treated as a challenge.
 
@@ -313,6 +405,9 @@ nix build .#checks.x86_64-linux.module       # the NixOS module evaluates and it
 ```
 
 - `tests/test_browser.py` drives the real Firefox against local pages.
+- `tests/test_challenge.py` solves a stand-in widget through `challenge`, and
+  hands it to a person in the live view (the real x11vnc, and noVNC in a
+  second Firefox).
 - `tests/test_proxy_ca.py` runs behind mitmproxy.
 
 CI ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the tests

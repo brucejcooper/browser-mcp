@@ -8,6 +8,7 @@ import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 # The URL deny list: a word here refuses a URL whose host or path has it as a
 # whole word ("buy" refuses /buy/123 and buy.example.com, not /buying-guide).
@@ -163,6 +164,18 @@ class StdioConfig:
 
 
 @dataclass
+class ViewConfig:
+    """The live view a person solves a challenge in (challenge's ask_human)."""
+    mode: str = "local"  # local: 127.0.0.1, the token; proxied: behind an authenticating proxy
+    host: str = "127.0.0.1"  # proxied only; local always binds 127.0.0.1
+    port: int = 0  # 0: any free port (local only)
+    public_url: str = ""  # proxied: the proxy's URL for the view, the link's base
+    user_header: str = ""  # proxied: the header the proxy names the user in
+    timeout: float = 600.0  # seconds before an unfinished hand-off fails
+    novnc_dir: str = ""  # noVNC's files; empty: BROWSER_MCP_NOVNC_DIR
+
+
+@dataclass
 class SearchConfig:
     default: str = "duckduckgo"
 
@@ -182,6 +195,7 @@ class Config:
     http: HttpConfig = field(default_factory=HttpConfig)
     stdio: StdioConfig = field(default_factory=StdioConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    view: ViewConfig = field(default_factory=ViewConfig)
     engines: dict[str, Engine] = field(default_factory=lambda: dict(DEFAULT_ENGINES))
     sites: dict[str, Site] = field(default_factory=dict)
 
@@ -236,6 +250,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         cfg.proxy.username = env["BROWSER_MCP_PROXY_USER"]
     if env.get("BROWSER_MCP_PROXY_PASSWORD_FILE"):
         cfg.proxy.password_file = env["BROWSER_MCP_PROXY_PASSWORD_FILE"]
+    if not cfg.view.novnc_dir and env.get("BROWSER_MCP_NOVNC_DIR"):
+        cfg.view.novnc_dir = env["BROWSER_MCP_NOVNC_DIR"]
     validate(cfg)
     return cfg
 
@@ -251,6 +267,23 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"search.default: no engine {cfg.search.default!r}")
     if cfg.transport not in ("stdio", "http"):
         raise ConfigError("transport: stdio or http")
+    view = cfg.view
+    if view.mode not in ("local", "proxied"):
+        raise ConfigError("view.mode: local or proxied")
+    if view.timeout <= 0:
+        raise ConfigError("view.timeout: must be positive")
+    if view.mode == "proxied":
+        if not view.public_url.startswith(("https://", "http://")):
+            raise ConfigError("view.public_url: proxied mode needs the proxy's URL for the view")
+        url = urlsplit(view.public_url)
+        if url.path not in ("", "/") or url.query or url.fragment:
+            # The view's paths (its cookie's, its redirect) are absolute.
+            raise ConfigError("view.public_url: must be the root of its host (e.g. https://view.example.org/), "
+                              "without a path")
+        if not view.user_header:
+            raise ConfigError("view.user_header: proxied mode needs the header the proxy names the user in")
+        if not view.port:
+            raise ConfigError("view.port: proxied mode needs a fixed port for the proxy to reach")
     for p in cfg.tls.ca_files:
         if not Path(p).is_file():
             raise ConfigError(f"tls.ca_files: {p} is not a file")

@@ -80,3 +80,22 @@ async def test_pace_spaces_page_actions(monkeypatch):
     t0 = time.monotonic()
     await limits.pace()
     assert 0.19 <= time.monotonic() - t0 <= 0.5
+
+
+def test_a_site_left_alone_is_refused_until_midnight_and_it_persists(tmp_path):
+    from datetime import datetime
+    clock = Clock()
+    state = tmp_path / "limits.json"
+    limits = Limits(LimitsConfig(), state, clock=clock)
+    until = limits.leave_alone("shop.example.com")
+    end = datetime.fromtimestamp(until).astimezone()
+    assert (end.hour, end.minute, end.second) == (0, 0, 0)
+    assert 0 < until - clock.t <= DAY
+    with pytest.raises(LimitExceeded, match=r"example.com is left alone until \S+ \(in \d+ s\): a challenge there"):
+        limits.check("c", "www.example.com")
+    limits.check("c", "www.example.org")
+    again = Limits(LimitsConfig(), state, clock=clock)
+    with pytest.raises(LimitExceeded, match="left alone"):
+        again.check("c", "example.com")
+    clock.t = until + 1
+    again.check("c", "example.com")

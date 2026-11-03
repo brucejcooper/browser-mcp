@@ -33,6 +33,7 @@
               ++ [
                 ps.pytest
                 ps.pytest-asyncio
+                ps.websockets # the live view's tests' client
               ]
             ))
             pkgs.mitmproxy

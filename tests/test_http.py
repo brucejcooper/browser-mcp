@@ -82,8 +82,8 @@ async def test_loopback_without_a_token_lists_the_tools(tmp_path):
             session = {**HEADERS, "Mcp-Session-Id": r.headers["mcp-session-id"]}
             await c.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}, headers=session)
             r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=session)
-            names = sorted(t for t in ("browse", "search", "site_search") if f'"name":"{t}"' in r.text)
-            assert names == ["browse", "search", "site_search"]
+            names = sorted(t for t in ("browse", "challenge", "search", "site_search") if f'"name":"{t}"' in r.text)
+            assert names == ["browse", "challenge", "search", "site_search"]
             assert "untrusted" in r.text
             for absent in ("click", "type", "fill"):
                 assert f'"name":"{absent}"' not in r.text

@@ -1,5 +1,6 @@
 """Bot challenges: detect them, wait out interstitials, click a checkbox
-widget, and report anything else. Solving the rest is phase 2's."""
+widget, and report anything else. And find the widget a challenge is
+solved in, which is all `challenge()` may act on."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import random
 import time
 from dataclasses import dataclass
 
-from playwright.async_api import Frame, Page, Response
+from playwright.async_api import ElementHandle, Frame, Page, Response
 
 from .human import Human
 
@@ -27,6 +28,9 @@ _DETECT_JS = """() => {
     cf_turnstile: has('.cf-turnstile, [name="cf-turnstile-response"], #turnstile-wrapper'),
     px: has('#px-captcha, [id^="px-captcha"]'),
     dd: has('iframe[src*="captcha-delivery.com"]'),
+    // A widget that has been solved: its response token is filled in.
+    solved: [...document.querySelectorAll('[name="h-captcha-response"], [name="g-recaptcha-response"], [name="cf-turnstile-response"]')]
+      .some(e => e.value),
   };
 }"""
 
@@ -84,6 +88,8 @@ async def detect(page: Page, response: Response | None) -> Challenge | None:
     blocking = status in (401, 403, 429, 503) or len(body) < 1500 or any(
         w in body for w in ("verify you are human", "are you a robot", "not a robot",
                             "unusual traffic", "complete the security check"))
+    if s["solved"]:
+        return None  # a solved widget: the page is the site's again
     if blocking:
         for kind in ("turnstile", "hcaptcha", "recaptcha"):
             if kind in frames and await _visible_widget(page, kind):
@@ -154,6 +160,65 @@ async def _click_checkbox(page: Page, human: Human, ch: Challenge) -> bool:
         await human.click_at(x, y)
         return True
     return False
+
+
+# What each kind of challenge is solved in: frames of a widget's kind, or an
+# element on the page itself. The rest (interstitials, block pages) have none.
+_WIDGET_FRAMES = {"cloudflare_turnstile": "turnstile", "turnstile": "turnstile", "hcaptcha": "hcaptcha",
+                  "recaptcha": "recaptcha", "datadome": "datadome"}
+_WIDGET_ELEMENTS = {"perimeterx": "#px-captcha"}
+
+
+@dataclass
+class Widget:
+    frame: Frame | None  # None: an element of the page itself
+    element: ElementHandle
+    box: dict[str, float]  # in the viewport, CSS pixels
+
+
+async def widget(page: Page, ch: Challenge) -> Widget | None:
+    """The widget the challenge is solved in, scrolled into view: the largest
+    visible one, so an image challenge's frame once it has opened, else the
+    checkbox's. None if the challenge has no widget."""
+    candidates: list[tuple[Frame | None, ElementHandle]] = []
+    if ch.kind in _WIDGET_FRAMES:
+        want = _WIDGET_FRAMES[ch.kind]
+        for f in page.frames:
+            if f is not page.main_frame and _frame_kind(f.url) == want:
+                try:
+                    candidates.append((f, await f.frame_element()))
+                except Exception:
+                    continue
+    elif ch.kind in _WIDGET_ELEMENTS:
+        el = await page.query_selector(_WIDGET_ELEMENTS[ch.kind])
+        if el:
+            candidates.append((None, el))
+    best, area = None, 0.0
+    sx, sy = await page.evaluate("() => [scrollX, scrollY]")
+    for frame, el in candidates:
+        try:
+            if not await el.is_visible():
+                continue
+            box = await el.bounding_box()
+        except Exception:
+            continue
+        if not box or box["width"] < 20 or box["height"] < 20:
+            continue
+        # Off the page's top or left edge: parked out of sight, as reCAPTCHA
+        # parks its image frame until it is needed.
+        if box["x"] + sx + box["width"] <= 0 or box["y"] + sy + box["height"] <= 0:
+            continue
+        if box["width"] * box["height"] > area:
+            best, area = (frame, el), box["width"] * box["height"]
+    if best is None:
+        return None
+    frame, el = best
+    try:
+        await el.scroll_into_view_if_needed(timeout=5000)
+        box = await el.bounding_box()
+    except Exception:
+        return None
+    return Widget(frame, el, box) if box else None
 
 
 async def widget_screenshot(page: Page, ch: Challenge) -> str | None:

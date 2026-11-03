@@ -1,6 +1,7 @@
 """The page limits: per site (registrable domain) and in all per day, and per
 caller per hour, as sliding windows, kept in the state directory across
-restarts. And the jittered spacing between page actions."""
+restarts; the sites left alone for the day after a challenge that wasn't
+solved. And the jittered spacing between page actions."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import json
 import random
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -44,6 +45,7 @@ class Limits:
         self.sites: dict[str, list[float]] = defaultdict(list)
         self.callers: dict[str, list[float]] = defaultdict(list)
         self.all: list[float] = []
+        self.left_alone: dict[str, float] = {}  # site: until when
         self._last_action = 0.0
         self._load()
 
@@ -54,12 +56,17 @@ class Limits:
                 table[k] = [t for t in table[k] if t > now - window]
                 if not table[k]:
                     del table[k]
+        self.left_alone = {k: t for k, t in self.left_alone.items() if t > now}
 
     def check(self, caller: str, host: str) -> None:
         """Refused if one more page for this caller and site would pass a cap."""
         now = self.clock()
         self._prune(now)
         site = site_of(host)
+        if site in self.left_alone:
+            when = datetime.fromtimestamp(self.left_alone[site], timezone.utc).isoformat(timespec="seconds")
+            raise LimitExceeded(f"{site} is left alone until {when} (in {int(self.left_alone[site] - now) + 1} s): "
+                                "a challenge there wasn't solved today")
         for times, cap, window, what in (
             (self.callers.get(caller, []), self.cfg.per_caller_per_hour, HOUR, f"{self.cfg.per_caller_per_hour} pages an hour for caller {caller!r}"),
             (self.sites.get(site, []), self.cfg.per_site_per_day, DAY, f"{self.cfg.per_site_per_day} pages a day on {site}"),
@@ -80,6 +87,16 @@ class Limits:
         self.callers[caller].append(now)
         self._save()
 
+    def leave_alone(self, host: str) -> float:
+        """No more pages on this site until the end of the (local) day."""
+        now = self.clock()
+        today = datetime.fromtimestamp(now).astimezone()
+        midnight = datetime.combine(today.date() + timedelta(days=1), dtime(), today.tzinfo)
+        until = midnight.timestamp()
+        self.left_alone[site_of(host)] = until
+        self._save()
+        return until
+
     async def pace(self) -> None:
         """Wait out the jittered spacing since the last page action."""
         gap = random.uniform(self.cfg.delay_min, self.cfg.delay_max)
@@ -98,6 +115,7 @@ class Limits:
         self.all = [float(t) for t in data.get("all", [])]
         self.sites.update({k: [float(t) for t in v] for k, v in data.get("sites", {}).items()})
         self.callers.update({k: [float(t) for t in v] for k, v in data.get("callers", {}).items()})
+        self.left_alone = {k: float(t) for k, t in data.get("left_alone", {}).items()}
         self._prune(self.clock())
 
     def _save(self) -> None:
@@ -105,5 +123,6 @@ class Limits:
             return
         self._prune(self.clock())
         tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"all": self.all, "sites": self.sites, "callers": self.callers}))
+        tmp.write_text(json.dumps({"all": self.all, "sites": self.sites, "callers": self.callers,
+                                   "left_alone": self.left_alone}))
         tmp.replace(self.state_file)

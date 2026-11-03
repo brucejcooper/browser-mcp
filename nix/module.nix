@@ -27,7 +27,7 @@ in
       description = ''
         The config file, as in the README's reference (`examples/config.toml`):
         `browser`, `output`, `limits`, `deny`, `proxy`, `tls`, `log`, `metrics`,
-        `http`, `stdio`, `search`, `engines` and `sites`. Unset settings keep the
+        `http`, `stdio`, `view`, `search`, `engines` and `sites`. Unset settings keep the
         server's defaults.
       '';
       default = { };

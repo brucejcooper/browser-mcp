@@ -102,15 +102,19 @@ class Human:
             await target.focus()  # something kept covering it
         await self.page.keyboard.press("Control+A")
         await self.page.keyboard.press("Backspace")
-        for i, ch in enumerate(text):
+        await self.keys(text)
+        if (await target.input_value()).strip() != text.strip():
+            await target.fill(text)  # the page rewrote it as we typed
+        await asyncio.sleep(random.uniform(0.25, 0.7))
+
+    async def keys(self, text: str) -> None:
+        """Type into whatever has the focus, with a jittered rhythm."""
+        for ch in text:
             await self.page.keyboard.type(ch)
             delay = random.lognormvariate(math.log(0.11), 0.4)
             if ch == " " or random.random() < 0.05:
                 delay += random.uniform(0.1, 0.35)  # a beat between words
             await asyncio.sleep(min(delay, 0.8))
-        if (await target.input_value()).strip() != text.strip():
-            await target.fill(text)  # the page rewrote it as we typed
-        await asyncio.sleep(random.uniform(0.25, 0.7))
 
     async def scroll(self, amount: float | None = None) -> None:
         """Wheel down in uneven notches, with pauses."""

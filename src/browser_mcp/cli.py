@@ -78,6 +78,7 @@ async def _stdio(mcp, service) -> None:
     try:
         await mcp.run_stdio_async()
     finally:
+        await service.end_handoff()
         await service.browser.close()
         await service.egress.stop()
 
@@ -90,6 +91,7 @@ async def _http(app, service, cfg) -> None:
     try:
         await server.serve()
     finally:
+        await service.end_handoff()
         await service.browser.close()
         await service.egress.stop()
 

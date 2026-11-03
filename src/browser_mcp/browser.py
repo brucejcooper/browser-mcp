@@ -121,6 +121,11 @@ class Browser:
     def running(self) -> bool:
         return self._ctx is not None
 
+    @property
+    def own_display(self) -> str | None:
+        """The display of the server's own Xvfb, which shows only this browser."""
+        return self._xvfb.display if self._xvfb is not None and self.running else None
+
     async def page(self) -> Page:
         self._last_used = time.monotonic()
         if self._page is None or self._page.is_closed():

@@ -1,5 +1,6 @@
 """What the tools do: browse, search and site_search, each a few top-level
-page loads, every one checked, limited, paced and logged."""
+page loads, every one checked, limited, paced and logged; and challenge,
+which acts only on the challenge the last page load stopped at."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -25,6 +27,7 @@ from .egress import REFUSED_HEADER, EgressProxy
 from .guard import Guard, Refused
 from .human import Human
 from .limits import LimitExceeded, Limits, site_of
+from .liveview import LiveView, Unavailable
 from .pagelog import PageLog
 
 log = logging.getLogger(__name__)
@@ -96,6 +99,37 @@ class ToolRefused(Exception):
     """The tool's answer is a refusal or an error, with a message for the caller."""
 
 
+CHALLENGE_ACTIONS = ("screenshot", "click", "type", "ask_human", "resume")
+
+# Focus on a text input inside the frame: the only place `type` types.
+_FOCUSED_INPUT_JS = """() => {
+  const e = document.activeElement;
+  if (!e || !document.hasFocus()) return false;
+  if (e.tagName === 'TEXTAREA') return true;
+  return e.tagName === 'INPUT' && ['text', 'search', 'tel', 'number', ''].includes(e.type);
+}"""
+
+
+@dataclass
+class Pending:
+    """The challenge the tab is stopped at: all that challenge() acts on."""
+    kind: str
+    url: str  # the page that was asked for
+    caller: str
+    view: LiveView | None = None
+    watcher: asyncio.Task | None = None
+    ended: str | None = None  # how the hand-off ended: done, cleared, timeout or closed
+    failed: str | None = None  # why it failed, if it did: the site is left alone
+
+    @property
+    def with_human(self) -> bool:
+        return self.view is not None and self.ended is None
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+
+
 @dataclass
 class PageResult:
     url: str
@@ -162,11 +196,14 @@ class Service:
         self.egress = egress
         self.limits = limits
         self.pagelog = pagelog
+        self.pending: Pending | None = None
 
     # The tools.
 
     async def browse(self, url: str, caller: str, screenshot: bool = False) -> PageResult:
         async with self.browser.lock:
+            self._not_with_human()  # under the lock: ask_human may have just handed it over
+            self.pending = None
             page = await self.browser.page()
             referer = page.url if url in self.browser.current_links else None
             result = await self._open(page, url, caller, "browse", referer=referer)
@@ -183,6 +220,8 @@ class Service:
             raise ToolRefused(f"no search engine {name!r}; configured: {', '.join(sorted(self.cfg.engines))}")
         eng = self.cfg.engines[name]
         async with self.browser.lock:
+            self._not_with_human()  # under the lock: ask_human may have just handed it over
+            self.pending = None
             page = await self.browser.page()
             result = await self._search_box(page, eng.url, [eng.input] if eng.input else GENERIC_SEARCH_INPUT,
                                             query, caller, "search")
@@ -200,6 +239,8 @@ class Service:
     async def site_search(self, site: str, query: str, caller: str) -> PageResult:
         recipe = self._recipe(site)
         async with self.browser.lock:
+            self._not_with_human()  # under the lock: ask_human may have just handed it over
+            self.pending = None
             page = await self.browser.page()
             selectors = [recipe.input] if recipe.input else GENERIC_SEARCH_INPUT
             result = await self._search_box(page, recipe.url, selectors, query, caller, "site_search")
@@ -207,6 +248,243 @@ class Service:
                 await self._extract(page, result)
             self.browser.touch()
             return result
+
+    def _not_with_human(self) -> None:
+        if self.pending is not None and self.pending.with_human:
+            raise ToolRefused("refused: a person is solving a challenge in the live view, so the browser is "
+                              f"theirs until it closes (by {_iso(self.pending.view.expires)} at the latest). "
+                              "challenge(resume) says when they're done.")
+
+    # The challenge tool.
+
+    async def challenge(self, action: str, caller: str, x: float | None = None, y: float | None = None,
+                        text: str | None = None) -> tuple[dict[str, Any], str | None]:
+        # Every check under the lock: another call (a page load, ask_human)
+        # may change the pending challenge while this one waits for it.
+        async with self.browser.lock:
+            pend = self.pending
+
+            def refuse(why: str, outcome: str = "refused"):
+                self.pagelog.action(caller=caller, action=action, url=pend.url if pend else None,
+                                    challenge=pend.kind if pend else None, outcome=outcome, detail=why)
+                raise ToolRefused(why)
+
+            if action not in CHALLENGE_ACTIONS:
+                refuse(f"no action {action!r}: one of {', '.join(CHALLENGE_ACTIONS)}", "refused:action")
+            if pend is None:
+                refuse("refused: there is no challenge to act on. The challenge tool acts only on a challenge "
+                       "the last page load stopped at.", "refused:no_challenge")
+            if pend.caller != caller:
+                refuse("refused: this challenge was met by another caller", "refused:caller")
+            if pend.with_human:
+                if action == "resume":
+                    self.pagelog.action(caller=caller, action=action, url=pend.url, challenge=pend.kind,
+                                        outcome="waiting")
+                    return {"challenge": pend.kind, "status": "with_human", "expires": _iso(pend.view.expires),
+                            "note": "A person is still at it in the live view. Call resume again later."}, None
+                refuse("refused: a person is solving it in the live view; resume once they're done",
+                       "refused:human")
+            if not self.browser.running:
+                self.pending = None
+                refuse("refused: the browser has closed since the challenge; load the page again",
+                       "refused:gone")
+            page = await self.browser.page()
+            self.browser.touch()
+            act = getattr(self, f"_challenge_{action}")
+            return await act(page, pend, caller, refuse, x=x, y=y, text=text)
+
+    async def _challenge_screenshot(self, page: Page, pend: Pending, caller: str, refuse, **_) -> tuple[dict, str]:
+        w = await challenge.widget(page, challenge.Challenge(pend.kind))
+        out: dict[str, Any] = {"challenge": pend.kind}
+        if w is None:
+            shot = await page.screenshot(type="png")
+            out["frame"] = None
+            out["note"] = ("This challenge has no widget to click or type in (the screenshot is the page): "
+                           "ask_human, or leave the site.")
+        else:
+            shot = await w.element.screenshot(type="png", timeout=5000)
+            out["frame"] = {k: round(v) for k, v in w.box.items()}
+            out["note"] = ("The screenshot is the widget's frame. click and type take coordinates relative to "
+                           "its top left, in the screenshot's pixels; a click outside it is refused.")
+        self.pagelog.action(caller=caller, action="screenshot", url=pend.url, challenge=pend.kind, outcome="ok")
+        return out, base64.b64encode(shot).decode()
+
+    async def _challenge_click(self, page: Page, pend: Pending, caller: str, refuse, x=None, y=None,
+                               **_) -> tuple[dict, str | None]:
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            refuse("click needs x and y, relative to the widget's frame", "refused:args")
+        w = await challenge.widget(page, challenge.Challenge(pend.kind))
+        if w is None:
+            refuse("refused: this challenge has no widget to click in: ask_human, or leave the site",
+                   "refused:no_widget")
+        width, height = w.box["width"], w.box["height"]
+        if not (0 <= x < width and 0 <= y < height):
+            refuse(f"refused: ({x}, {y}) is outside the widget's frame, which is {round(width)}x{round(height)}",
+                   "refused:outside")
+        await self._human(page).click_at(w.box["x"] + x, w.box["y"] + y)
+        self.pagelog.action(caller=caller, action="click", url=pend.url, challenge=pend.kind, outcome="ok",
+                            x=round(x), y=round(y))
+        return await self._after_action(page, pend)
+
+    async def _challenge_type(self, page: Page, pend: Pending, caller: str, refuse, text=None,
+                              **_) -> tuple[dict, str | None]:
+        if not text or not isinstance(text, str) or len(text) > 100:
+            refuse("type needs text, up to 100 characters", "refused:args")
+        w = await challenge.widget(page, challenge.Challenge(pend.kind))
+        if w is None or w.frame is None:
+            refuse("refused: this challenge has no frame with an input to type in", "refused:no_widget")
+        try:
+            ours = await w.element.evaluate("e => document.activeElement === e")
+            focused = ours and await w.frame.evaluate(_FOCUSED_INPUT_JS)
+        except PlaywrightError:
+            focused = False
+        if not focused:
+            refuse("refused: the focus isn't in a text input inside the widget's frame; click the input first",
+                   "refused:focus")
+        await self._human(page).keys(text)
+        self.pagelog.action(caller=caller, action="type", url=pend.url, challenge=pend.kind, outcome="ok",
+                            length=len(text))
+        return await self._after_action(page, pend)
+
+    async def _after_action(self, page: Page, pend: Pending) -> tuple[dict, str | None]:
+        """How the challenge stands once a click or typing has settled."""
+        await asyncio.sleep(random.uniform(1.2, 2.0))
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        ch = await challenge.detect(page, self.browser.last_response)
+        if ch is None:
+            return {"challenge": None, "note": "The challenge is gone: resume returns the page."}, None
+        w = await challenge.widget(page, ch)
+        shot = None
+        with contextlib.suppress(Exception):
+            shot = base64.b64encode(await (w.element.screenshot(type="png", timeout=5000) if w
+                                           else page.screenshot(type="png"))).decode()
+        return {"challenge": ch.kind, "frame": {k: round(v) for k, v in w.box.items()} if w else None,
+                "note": "Still there; the screenshot is the widget now."}, shot
+
+    async def _challenge_ask_human(self, page: Page, pend: Pending, caller: str, refuse, **_) -> tuple[dict, None]:
+        if pend.view is not None:
+            refuse("refused: this challenge has already been handed to a person once", "refused:again")
+        display = self.browser.own_display
+        if display is None:
+            refuse("refused: the live view shows only the server's own Xvfb, and this browser isn't on one "
+                   "(browser.display or headless)", "refused:unavailable")
+        host = urlsplit(pend.url).hostname or pend.url
+        try:
+            view = LiveView(self.cfg.view, display, describe=f"a {pend.kind} challenge on {host}")
+        except Unavailable as e:
+            refuse(f"refused: no live view here: {e}", "refused:unavailable")
+        await view.start()
+        pend.view = view
+        pend.watcher = asyncio.create_task(self._watch(pend))
+        self.pagelog.action(caller=caller, action="ask_human", url=pend.url, challenge=pend.kind, outcome="ok",
+                            mode=self.cfg.view.mode, expires=_iso(view.expires))
+        return {"challenge": pend.kind, "link": view.url, "expires": _iso(view.expires), "mode": self.cfg.view.mode,
+                "note": ("Show the user this link: a live view of the browser to solve the challenge in. "
+                         "It opens once, and closes by itself when the challenge clears, when they press "
+                         "Done, or at the expiry. Then call resume.")}, None
+
+    async def _watch(self, pend: Pending) -> None:
+        """The hand-off, until Done, the challenge clearing, or the timeout."""
+        view = pend.view
+        ended, clear = "closed", 0
+        try:
+            while True:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(view.done.wait(), 2.0)
+                if view.done.is_set():
+                    ended = "done"
+                    break
+                if time.time() > view.expires:
+                    ended = "timeout"
+                    break
+                async with self.browser.lock:
+                    if not self.browser.running:
+                        break
+                    self.browser.touch()
+                    try:
+                        gone = await challenge.detect(await self.browser.page(), self.browser.last_response) is None
+                    except Exception:
+                        gone = False
+                # Twice in a row: a page in the middle of navigating reads as clear.
+                clear = clear + 1 if gone else 0
+                if clear >= 2:
+                    ended = "cleared"
+                    break
+        finally:
+            await view.stop()
+            if ended == "timeout":
+                pend.failed = "the live view timed out with the challenge unsolved"
+            elif ended == "done" and await self._still_there():
+                pend.failed = "the person closed the live view with the challenge still there"
+            if pend.failed:
+                until = self.limits.leave_alone(urlsplit(pend.url).hostname or "")
+                pend.failed += f"; {site_of(urlsplit(pend.url).hostname or '')} is left alone until {_iso(until)}"
+            # Only now: until here the browser is still the person's.
+            pend.ended = ended
+            self.pagelog.action(caller=pend.caller, action="ask_human", url=pend.url, challenge=pend.kind,
+                                outcome=f"ended:{ended}", detail=pend.failed, user=view.user)
+            log.info("live view closed: %s", ended)
+
+    async def _still_there(self) -> bool:
+        """After Done: is the challenge still there? Twice, a little apart,
+        since Done may come as the solved page is loading."""
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(2.0)
+            async with self.browser.lock:
+                if not self.browser.running:
+                    return False
+                try:
+                    page = await self.browser.page()
+                    with contextlib.suppress(Exception):
+                        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    if await challenge.detect(page, self.browser.last_response) is None:
+                        return False
+                except Exception:
+                    pass
+        return True
+
+    async def _challenge_resume(self, page: Page, pend: Pending, caller: str, refuse, **_) -> tuple[dict, None]:
+        if pend.failed:
+            self.pending = None
+            refuse(f"failed: {pend.failed}", "failed:timeout" if pend.ended == "timeout" else "failed:not_cleared")
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        ch = await challenge.detect(page, self.browser.last_response)
+        if ch is not None:
+            if pend.ended == "done":
+                # The watcher saw it gone at Done, but it's back.
+                until = self.limits.leave_alone(urlsplit(pend.url).hostname or "")
+                self.pending = None
+                refuse(f"failed: the person closed the live view with the challenge still there; "
+                       f"{site_of(urlsplit(pend.url).hostname or '')} is left alone until {_iso(until)}",
+                       "failed:not_cleared")
+            refuse(f"the challenge ({ch.kind}) is still there: screenshot to see it, or ask_human",
+                   "refused:still_there")
+        result = PageResult(url=pend.url, final_url=page.url)
+        latest = self.browser.last_response
+        if latest is not None and latest.url.split("#")[0] == page.url.split("#")[0]:
+            result.status = latest.status
+        try:
+            if page.url.startswith("http"):
+                self.guard.check_url(page.url)
+        except Refused as e:
+            self.pending = None
+            await page.goto("about:blank")
+            refuse(f"refused: it ended up at {page.url}: {e}", "refused:deny_list")
+        await self._extract(page, result)
+        self.pending = None
+        self.pagelog.action(caller=caller, action="resume", url=pend.url, challenge=pend.kind, outcome="ok",
+                            final_url=page.url, by=pend.ended and "human" or "client")
+        return result.as_dict(), None
+
+    async def end_handoff(self) -> None:
+        """At shutdown: close a live view that is still open."""
+        if self.pending is not None and self.pending.watcher is not None:
+            self.pending.watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.pending.watcher
 
     def _recipe(self, site: str) -> Site:
         if site in self.cfg.sites:
@@ -397,8 +675,11 @@ class Service:
         outcome = "ok"
         if ch is not None:
             outcome = "challenge"
-            result.challenge = {"kind": ch.kind, "note": "Not solved: the trivial ways past it didn't work."}
+            result.challenge = {"kind": ch.kind, "note": (
+                "Not passed by the trivial ways. The challenge tool acts on it (screenshot, click, "
+                "type, ask_human for a person, resume once it's gone), until the next page load.")}
             result.screenshot = await challenge.widget_screenshot(page, ch)
+            self.pending = Pending(ch.kind, url, caller)
         try:
             if page.url.startswith("http"):
                 self.guard.check_url(page.url)
