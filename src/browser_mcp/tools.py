@@ -99,6 +99,9 @@ class ToolRefused(Exception):
     """The tool's answer is a refusal or an error, with a message for the caller."""
 
 
+# Challenges that are a refusal, not a test: nothing on them to solve.
+BLOCKS = ("akamai_block", "block_page")
+
 CHALLENGE_ACTIONS = ("screenshot", "click", "type", "ask_human", "resume")
 
 # Focus on a text input inside the frame: the only place `type` types.
@@ -518,8 +521,18 @@ class Service:
         except LimitExceeded as e:
             self.pagelog.page(caller=caller, tool=tool, url=url, outcome="refused:limit", detail=str(e))
             raise ToolRefused(str(e)) from None
+        await self.limits.space(host, self._min_interval(host))
         await self.limits.pace()
         self.limits.record(caller, host)
+
+    def _min_interval(self, host: str) -> float:
+        """The seconds between page loads on this host's site: its recipe's,
+        if it has one, else limits.site_min_interval."""
+        site = site_of(host)
+        for recipe in self.cfg.sites.values():
+            if recipe.min_interval and site_of(urlsplit(recipe.url).hostname or "") == site:
+                return recipe.min_interval
+        return self.cfg.limits.site_min_interval
 
     def _human(self, page: Page) -> Human:
         h = getattr(page, "_bmcp_human", None)
@@ -672,8 +685,19 @@ class Service:
         if size is None:
             with contextlib.suppress(Exception):
                 size = len((await page.content()).encode())
-        outcome = "ok"
-        if ch is not None:
+        outcome, detail = "ok", None
+        if ch is not None and ch.kind in BLOCKS:
+            # Nothing to solve, and every retry adds to the address's score
+            # with the bot manager: leave the site alone for the day.
+            outcome = "challenge"
+            host = urlsplit(url).hostname or ""
+            until = self.limits.leave_alone(host, f"it answered with a block page ({ch.kind}) today")
+            detail = f"{site_of(host)} left alone until {_iso(until)}"
+            result.challenge = {"kind": ch.kind, "note": (
+                "A block page: there is nothing on it to solve, and every retry makes it worse. "
+                f"{site_of(host)} is left alone until {_iso(until)}: every page on it is refused until then.")}
+            result.screenshot = await challenge.widget_screenshot(page, ch)
+        elif ch is not None:
             outcome = "challenge"
             result.challenge = {"kind": ch.kind, "note": (
                 "Not passed by the trivial ways. The challenge tool acts on it (screenshot, click, "
@@ -689,7 +713,7 @@ class Service:
             await page.goto("about:blank")
             raise ToolRefused(f"refused: it ended up at {page.url}: {e}") from None
         self.pagelog.page(caller=caller, tool=tool, url=url, final_url=page.url, status=result.status,
-                          bytes=size, challenge=ch.kind if ch else None, outcome=outcome)
+                          bytes=size, challenge=ch.kind if ch else None, outcome=outcome, detail=detail)
         return result
 
     async def _extract(self, page: Page, result: PageResult) -> None:

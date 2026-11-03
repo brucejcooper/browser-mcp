@@ -63,7 +63,7 @@ async def test_browse_returns_text_links_and_a_human_looking_browser(service, si
     env = await page.evaluate("""() => ({wd: navigator.webdriver, sw: screen.width, sh: screen.height,
         getter: Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver').get.toString()})""")
     assert env["wd"] is False
-    assert "[native code]" in env["getter"]
+    assert env["getter"] == "function webdriver() {\n    [native code]\n}"
     assert (env["sw"], env["sh"]) == (1920, 1080)
 
     # Following a link from the page keeps it as the referer.
@@ -73,6 +73,88 @@ async def test_browse_returns_text_links_and_a_human_looking_browser(service, si
     lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
     assert [l["outcome"] for l in lines] == ["ok", "ok"]
     assert lines[0]["caller"] == "t" and lines[0]["status"] == 200 and lines[0]["bytes"] > 0
+
+
+FINGERPRINT = """() => {
+  const native = f => Function.prototype.toString.call(f);
+  const getter = name => Object.getOwnPropertyDescriptor(Navigator.prototype, name).get;
+  const gl = document.createElement('canvas').getContext('webgl');
+  const gl2 = document.createElement('canvas').getContext('webgl2');
+  const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+  let wrongThis = null;
+  try { getter('webdriver').call({}); } catch (e) { wrongThis = e.constructor.name; }
+  return {
+    pdfViewerEnabled: navigator.pdfViewerEnabled, plugins: navigator.plugins.length,
+    mimeTypes: navigator.mimeTypes.length,
+    webgl: !!gl, webgl2: !!gl2, renderer: info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : null,
+    languages: navigator.languages, language: navigator.language,
+    intl: Intl.DateTimeFormat().resolvedOptions().locale,
+    webdriver: navigator.webdriver, getter: native(getter('webdriver')),
+    getterName: getter('webdriver').name, wrongThis,
+    toString: native(Function.prototype.toString), toStringName: Function.prototype.toString.name,
+    own: native(function own() { return 1; }),
+  };
+}"""
+
+
+async def test_the_fingerprint_is_a_persons_firefox(service, site, tmp_path):
+    """The tells #7 measured: the PDF viewer, WebGL, the webdriver getter and
+    the languages, as a person's Firefox has them."""
+    site.pages["/"] = PAGE
+    cfg = config(tmp_path)
+    cfg.browser.locale = "en-AU"
+    svc = await service(cfg)
+    await svc.browse(site.base + "/", "t")
+    env = await (await svc.browser.page()).evaluate(FINGERPRINT)
+    assert (env["pdfViewerEnabled"], env["plugins"], env["mimeTypes"]) == (True, 5, 2)
+    assert env["webgl"] and env["webgl2"] and env["renderer"]
+    assert env["languages"] == ["en-AU", "en"] and env["language"] == "en-AU"
+    assert env["intl"] == "en-AU"
+    assert site.requests[-1][1]["Accept-Language"] == "en-AU,en;q=0.9"
+    assert env["webdriver"] is False
+    assert env["getter"] == "function webdriver() {\n    [native code]\n}"
+    assert env["getterName"] == "get webdriver" and env["wrongThis"] == "TypeError"
+    assert env["toString"] == "function toString() {\n    [native code]\n}" and env["toStringName"] == "toString"
+    assert env["own"] == "function own() { return 1; }"
+
+
+async def test_a_block_page_leaves_the_site_alone(service, site, tmp_path):
+    """Nothing on a block page to solve, and a retry only adds to the score:
+    the site is refused for the rest of the day, and the result says so."""
+    site.pages["/"] = (403, {"Server": "AkamaiGHost"},
+                       "<title>Access Denied</title><h1>Access Denied</h1>"
+                       "<p>You don't have permission to access this server.</p><p>Reference #18.abc</p>")
+    site.pages["/other"] = PAGE
+    svc = await service()
+    r = await svc.browse(site.base + "/", "t")
+    assert r.challenge["kind"] == "akamai_block"
+    assert "127.0.0.1 is left alone until" in r.challenge["note"]
+    assert svc.pending is None  # nothing for challenge() to act on
+    with pytest.raises(ToolRefused, match="no challenge"):
+        await svc.challenge("screenshot", "t")
+    seen = len(site.requests)
+    with pytest.raises(ToolRefused, match=r"left alone until .*: it answered with a block page \(akamai_block\)"):
+        await svc.browse(site.base + "/other", "t")
+    assert len(site.requests) == seen
+    lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
+    blocked = [l for l in lines if l["outcome"] == "challenge"]
+    assert len(blocked) == 1 and blocked[0]["challenge"] == "akamai_block"
+    assert "left alone until" in blocked[0]["detail"]
+    assert lines[-1]["outcome"] == "refused:limit"
+
+
+async def test_a_site_min_interval_spaces_its_page_loads(service, site, tmp_path):
+    import time
+    site.pages["/"] = PAGE
+    svc = await service(config(tmp_path, site_min_interval=3.0))
+    await svc.browse(site.base + "/", "t")
+    t0 = time.monotonic()
+    await svc.browse(site.base + "/", "t")
+    # The second load waited out the rest of the 3 s since the first.
+    first, second = [json.loads(l)["time"] for l in (tmp_path / "pages.log").read_text().splitlines()]
+    assert time.monotonic() - t0 >= 1.0
+    from datetime import datetime
+    assert (datetime.fromisoformat(second) - datetime.fromisoformat(first)).total_seconds() >= 3.0
 
 
 async def test_a_private_address_is_refused_before_loading(service, private_site):

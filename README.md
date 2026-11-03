@@ -136,7 +136,7 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 |---|---|---|
 | `state_dir` | `./state` | The browser profile (cookies, history) and the limits' counters. `--state-dir`, `BROWSER_MCP_STATE_DIR`. |
 | `transport` | `stdio` | `stdio` or `http`. `--transport`. |
-| `browser.locale` | `en-US` | The browser's locale and Accept-Language. |
+| `browser.locale` | `en-US` | The browser's locale: `navigator.languages` and Accept-Language are it and its language (`en-AU, en`), and `Intl` follows it (Firefox's `LANG`). |
 | `browser.timezone` | the host's | An IANA zone, e.g. `Europe/Berlin`. |
 | `browser.screen_width`, `screen_height` | 1920, 1080 | The virtual screen, and the window's size. |
 | `browser.idle_timeout` | 600 | Seconds without a call before the browser closes. The profile is kept. |
@@ -149,6 +149,7 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 | `limits.per_site_per_day` | 250 | Pages per registrable domain (`example.co.uk`) in any 24 hours. |
 | `limits.per_day` | 1000 | Pages in all in any 24 hours. |
 | `limits.per_caller_per_hour` | 50 | Pages per caller in any hour. |
+| `limits.site_min_interval` | 0 | Seconds between page loads on one site (registrable domain). A load that comes sooner waits, so a run of calls can't burst on a site. |
 | `deny.words` | login, signin, register, account, cart, checkout, bid, buy, offer, password, payment, … | A URL whose host or path has one of these as a whole word is refused. `/buy/1` is refused; `/buying-guide` is not. The query string isn't checked, so a search for "buy" is fine. |
 | `deny.patterns` | `[]` | Regexes on the whole URL, also refused. |
 | `deny.networks` | loopback, RFC 1918, CGNAT, link-local, ULA, multicast, … | Addresses the browser may never reach. |
@@ -171,7 +172,7 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 | `view.novnc_dir` | `BROWSER_MCP_NOVNC_DIR` | noVNC's files (the directory with `core/rfb.js`). The Nix package and the image set it. |
 | `search.default` | `duckduckgo` | The engine `search` uses when none is named. |
 | `engines.<name>` | duckduckgo, bing, google, brave | `url` (the start page), `input` (the search box), and `result`, `title`, `link` and `snippet` (CSS selectors for the results). If `result` matches nothing, links holding a heading are taken instead. |
-| `sites.<name>` | | `url` (the start page) and `input` (the search box; empty means the first search box). |
+| `sites.<name>` | | `url` (the start page), `input` (the search box; empty means the first search box), and `min_interval` (seconds between page loads on its site, instead of `limits.site_min_interval`; 0 keeps that). |
 
 The example config's sites are neutral (Wikipedia, the Internet Archive). A
 deployment adds its own.
@@ -201,8 +202,12 @@ It is held to the challenge so it can't become a general click tool:
 - every action is refused unless the last page load stopped at a challenge
   that is still pending; the next page load ends it;
 - only the caller that met the challenge may act on it;
-- interstitials and block pages have no widget, so only `ask_human` and
-  `resume` work on them;
+- interstitials have no widget, so only `ask_human` and `resume` work on
+  them;
+- a block page (`akamai_block`, `block_page`) isn't a challenge to act on at
+  all: there is nothing on it to solve, and every retry adds to the address's
+  score with the bot manager. The site is left alone for the rest of the day
+  (as after a failed hand-off, below), and the result's note says until when;
 - every action, refusals too, is a line in the page log (`tool: challenge`,
   with the `action` and its `outcome`; what was typed is not logged, only its
   length), and is counted in `browser_mcp_challenge_actions`.
@@ -335,9 +340,26 @@ All of these are in code, with their values in config.
   - The locale and time zone come from config.
   - There is one tab, and calls are serialised.
   - Popups are closed as they open.
-- **`navigator.webdriver` reads `false`**, as in a person's Firefox, from a
-  getter that still looks native. Firefox's `dom.webdriver.enabled` pref
-  doesn't change it.
+- **`navigator.webdriver` reads `false`**, as in a person's Firefox. Firefox's
+  `dom.webdriver.enabled` pref doesn't change it, so a page script does: the
+  getter is a Proxy of the native one (its name, length and errors are
+  native), and `Function.prototype.toString` reads it as the native
+  `function webdriver()`, and itself as the native `function toString()`. **It is still
+  detectable**: a worker's `navigator` isn't patched, and a script can find
+  the patch in a stack trace or a fresh frame. Only an engine-level fix
+  (Camoufox, below) hides it fully.
+- **The rest of the engine reads as desktop Firefox:**
+  - the PDF viewer is on (`navigator.pdfViewerEnabled`, and the 5 plugins),
+    which Playwright's defaults turn off;
+  - WebGL and WebGL2 work, on Mesa's software renderer (llvmpipe), which
+    needs no GPU;
+  - the languages come from Firefox's own `intl.accept_languages`, so
+    for `en-AU`, `navigator.languages` is `["en-AU", "en"]` and the header
+    `en-AU,en;q=0.9`. Playwright's `locale` would make them one tag. The Nix
+    package patches one line of Juggler (Playwright's driver in Firefox),
+    which otherwise sets the language override to `"undefined"` when no
+    locale is given.
+  - TLS (JA4) and HTTP/2 are stock Firefox's.
 - **Human-like input** (`human.py`):
   - the mouse moves along curved Bézier paths, eased, with a little tremor
     and the odd overshoot;
@@ -389,7 +411,8 @@ sites and with their bot-management vendors (Akamai, Cloudflare and others).
 If it is flagged, the person behind that IP can be challenged or blocked in
 their own browser too.
 - The limits keep the volume low, but bot managers react to bursts as much as
-  to totals.
+  to totals: `limits.site_min_interval` (or a site's `min_interval`) spaces
+  a site's pages, and a block page leaves the site alone for the day.
 - **Behind an employer's proxy, that is the employer's egress**, and its
   acceptable-use policy applies.
 

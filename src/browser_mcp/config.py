@@ -46,6 +46,7 @@ class Engine:
 class Site:
     url: str
     input: str = ""  # empty: the page's first search box
+    min_interval: float = 0.0  # seconds between page loads on this site; 0: limits.site_min_interval
 
 
 DEFAULT_ENGINES = {
@@ -113,6 +114,7 @@ class LimitsConfig:
     per_site_per_day: int = 250
     per_day: int = 1000
     per_caller_per_hour: int = 50
+    site_min_interval: float = 0.0  # seconds between page loads on one site, waited out
 
 
 @dataclass
@@ -260,9 +262,12 @@ def validate(cfg: Config) -> None:
     lim = cfg.limits
     if not 0 <= lim.delay_min <= lim.delay_max:
         raise ConfigError("limits: delay_min must be between 0 and delay_max")
-    for name in ("per_site_per_day", "per_day", "per_caller_per_hour"):
+    for name in ("per_site_per_day", "per_day", "per_caller_per_hour", "site_min_interval"):
         if getattr(lim, name) < 0:
             raise ConfigError(f"limits.{name}: must not be negative")
+    for name, site in cfg.sites.items():
+        if site.min_interval < 0:
+            raise ConfigError(f"sites.{name}.min_interval: must not be negative")
     if cfg.search.default not in cfg.engines:
         raise ConfigError(f"search.default: no engine {cfg.search.default!r}")
     if cfg.transport not in ("stdio", "http"):

@@ -1,12 +1,14 @@
 """The page limits: per site (registrable domain) and in all per day, and per
 caller per hour, as sliding windows, kept in the state directory across
 restarts; the sites left alone for the day after a challenge that wasn't
-solved. And the jittered spacing between page actions."""
+solved, or a block page. And the spacing: the jittered gap between page
+actions, and a site's minimum interval between its page loads."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import time
 from collections import defaultdict
@@ -19,6 +21,8 @@ import tldextract
 from .config import LimitsConfig
 from .guard import Refused
 
+log = logging.getLogger(__name__)
+
 DAY = 86400.0
 HOUR = 3600.0
 
@@ -30,6 +34,9 @@ def site_of(host: str) -> str:
     """The registrable domain: www.example.co.uk -> example.co.uk."""
     r = _extract(host)
     return r.top_domain_under_public_suffix or host.lower().rstrip(".")
+
+
+UNSOLVED = "a challenge there wasn't solved today"
 
 
 class LimitExceeded(Refused):
@@ -46,6 +53,7 @@ class Limits:
         self.callers: dict[str, list[float]] = defaultdict(list)
         self.all: list[float] = []
         self.left_alone: dict[str, float] = {}  # site: until when
+        self.left_alone_why: dict[str, str] = {}  # site: why
         self._last_action = 0.0
         self._load()
 
@@ -57,6 +65,7 @@ class Limits:
                 if not table[k]:
                     del table[k]
         self.left_alone = {k: t for k, t in self.left_alone.items() if t > now}
+        self.left_alone_why = {k: w for k, w in self.left_alone_why.items() if k in self.left_alone}
 
     def check(self, caller: str, host: str) -> None:
         """Refused if one more page for this caller and site would pass a cap."""
@@ -65,8 +74,9 @@ class Limits:
         site = site_of(host)
         if site in self.left_alone:
             when = datetime.fromtimestamp(self.left_alone[site], timezone.utc).isoformat(timespec="seconds")
+            why = self.left_alone_why.get(site, UNSOLVED)
             raise LimitExceeded(f"{site} is left alone until {when} (in {int(self.left_alone[site] - now) + 1} s): "
-                                "a challenge there wasn't solved today")
+                                f"{why}")
         for times, cap, window, what in (
             (self.callers.get(caller, []), self.cfg.per_caller_per_hour, HOUR, f"{self.cfg.per_caller_per_hour} pages an hour for caller {caller!r}"),
             (self.sites.get(site, []), self.cfg.per_site_per_day, DAY, f"{self.cfg.per_site_per_day} pages a day on {site}"),
@@ -87,15 +97,28 @@ class Limits:
         self.callers[caller].append(now)
         self._save()
 
-    def leave_alone(self, host: str) -> float:
+    def leave_alone(self, host: str, why: str = "") -> float:
         """No more pages on this site until the end of the (local) day."""
         now = self.clock()
         today = datetime.fromtimestamp(now).astimezone()
         midnight = datetime.combine(today.date() + timedelta(days=1), dtime(), today.tzinfo)
         until = midnight.timestamp()
         self.left_alone[site_of(host)] = until
+        self.left_alone_why[site_of(host)] = why or UNSOLVED
         self._save()
         return until
+
+    async def space(self, host: str, interval: float) -> None:
+        """Wait until the site's last page load is at least interval seconds
+        ago, so a run of calls can't burst on it."""
+        times = self.sites.get(site_of(host))
+        if interval <= 0 or not times:
+            return
+        wait = max(times) + interval - self.clock()
+        if wait > 0:
+            log.info("%s had a page %.0f s ago: waiting %.0f s (its minimum interval is %.0f s)",
+                     site_of(host), interval - wait, wait, interval)
+            await asyncio.sleep(wait)
 
     async def pace(self) -> None:
         """Wait out the jittered spacing since the last page action."""
@@ -116,6 +139,7 @@ class Limits:
         self.sites.update({k: [float(t) for t in v] for k, v in data.get("sites", {}).items()})
         self.callers.update({k: [float(t) for t in v] for k, v in data.get("callers", {}).items()})
         self.left_alone = {k: float(t) for k, t in data.get("left_alone", {}).items()}
+        self.left_alone_why = {k: str(w) for k, w in data.get("left_alone_why", {}).items()}
         self._prune(self.clock())
 
     def _save(self) -> None:
@@ -124,5 +148,5 @@ class Limits:
         self._prune(self.clock())
         tmp = self.state_file.with_suffix(".tmp")
         tmp.write_text(json.dumps({"all": self.all, "sites": self.sites, "callers": self.callers,
-                                   "left_alone": self.left_alone}))
+                                   "left_alone": self.left_alone, "left_alone_why": self.left_alone_why}))
         tmp.replace(self.state_file)

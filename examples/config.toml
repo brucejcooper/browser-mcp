@@ -5,7 +5,7 @@ state_dir = "./state"     # the browser profile and the limits' counters
 transport = "stdio"       # or "http"
 
 [browser]
-locale = "en-US"          # also the Accept-Language
+locale = "en-US"          # also navigator.languages and Accept-Language ("en-US, en"), and Intl
 timezone = ""             # an IANA name, e.g. "Europe/Berlin"; empty: the host's
 screen_width = 1920
 screen_height = 1080
@@ -26,6 +26,7 @@ delay_max = 3.0
 per_site_per_day = 250    # per registrable domain
 per_day = 1000
 per_caller_per_hour = 50
+site_min_interval = 0     # seconds between page loads on one site; a sooner one waits
 
 [deny]
 # words = [...]           # the URL deny list; the default refuses login,
@@ -84,7 +85,8 @@ default = "duckduckgo"    # also built in: bing, google, brave
 # snippet = "p"
 
 # Sites for site_search: a start page and its search box. A site that isn't
-# listed uses its home page's first search box.
+# listed uses its home page's first search box. min_interval (seconds between
+# page loads on the site) overrides limits.site_min_interval for it.
 [sites.wikipedia]
 url = "https://en.wikipedia.org/"
 input = 'input[name="search"]'

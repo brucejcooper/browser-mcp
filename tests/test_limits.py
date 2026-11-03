@@ -99,3 +99,33 @@ def test_a_site_left_alone_is_refused_until_midnight_and_it_persists(tmp_path):
         again.check("c", "example.com")
     clock.t = until + 1
     again.check("c", "example.com")
+
+
+def test_a_site_left_alone_says_why(tmp_path):
+    clock = Clock()
+    state = tmp_path / "limits.json"
+    Limits(LimitsConfig(), state, clock=clock).leave_alone("www.example.com", "it answered with a block page today")
+    again = Limits(LimitsConfig(), state, clock=clock)
+    with pytest.raises(LimitExceeded, match=r"example.com is left alone until \S+ \(in \d+ s\): it answered with a block page"):
+        again.check("c", "shop.example.com")
+
+
+async def test_space_waits_out_a_sites_min_interval(monkeypatch):
+    import asyncio
+    clock = Clock()
+    slept = []
+
+    async def sleep(s):
+        slept.append(s)
+        clock.t += s
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    limits = Limits(LimitsConfig(), clock=clock)
+    await limits.space("www.example.com", 30)  # nothing on the site yet
+    limits.record("c", "www.example.com")
+    clock.t += 10
+    await limits.space("shop.example.com", 30)  # the same site
+    assert slept == [20]
+    await limits.space("www.example.org", 30)  # another site
+    await limits.space("www.example.com", 0)  # no interval
+    assert slept == [20]

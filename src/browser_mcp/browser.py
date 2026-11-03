@@ -23,14 +23,39 @@ from .egress import EgressProxy
 log = logging.getLogger(__name__)
 
 # navigator.webdriver as a person's Firefox has it: false, from a getter that
-# still looks native (a Proxy of the original keeps its toString).
+# looks native. The getter is a Proxy of the native one, so its name, length
+# and errors (called on anything but a Navigator, it throws) are native; and
+# Function.prototype.toString answers for it, and for itself, as it would for
+# the originals. Still detectable in ways no page script can hide (a worker's
+# navigator, a stack trace); the engine-level fix is Camoufox.
 HIDE_WEBDRIVER = """(() => {
   const proto = Object.getPrototypeOf(navigator);
   const desc = Object.getOwnPropertyDescriptor(proto, 'webdriver');
   if (!desc || !desc.get) return;
-  const get = new Proxy(desc.get, { apply: () => false });
+  const get = new Proxy(desc.get, { apply: (target, self, args) => (Reflect.apply(target, self, args), false) });
   Object.defineProperty(proto, 'webdriver', { ...desc, get });
+  const toString = Function.prototype.toString;
+  const fake = new Proxy(toString, {
+    apply: (target, self, args) =>
+      Reflect.apply(target, self === fake ? toString : self === get ? desc.get : self, args),
+  });
+  Object.defineProperty(Function.prototype, 'toString', {
+    ...Object.getOwnPropertyDescriptor(Function.prototype, 'toString'), value: fake });
 })();"""
+
+
+def accept_languages(locale: str) -> str:
+    """Firefox's intl.accept_languages for a locale: the locale, then its
+    language (en-AU: "en-AU, en"), as Firefox's own builds have it. Firefox
+    makes navigator.languages and the Accept-Language header from it."""
+    lang = locale.split("-")[0]
+    return f"{locale}, {lang}" if lang != locale else locale
+
+
+def posix_locale(locale: str) -> str:
+    """The LANG Firefox takes its Intl locale from: en-AU -> en_AU.UTF-8."""
+    return locale.replace("-", "_") + ".UTF-8"
+
 
 # Prefs for the browser's egress and for looking like a person's Firefox.
 BASE_PREFS = {
@@ -46,6 +71,9 @@ BASE_PREFS = {
     # Classic scroll bars, so a page can be paged down by clicking the track.
     "widget.gtk.overlay-scrollbars.enabled": False,
     "widget.non-native-theme.scrollbar.style": 4,
+    # The built-in PDF viewer, which Playwright's defaults turn off: with it,
+    # navigator.pdfViewerEnabled is true and navigator.plugins has its 5 entries.
+    "pdfjs.disabled": False,
     # No first-run pages, no telemetry, no update checks.
     "browser.shell.checkDefaultBrowser": False,
     "browser.startup.homepage_override.mstone": "ignore",
@@ -147,7 +175,13 @@ class Browser:
         await asyncio.to_thread(tls.install_into_profile, self.profile, self.cfg.tls.ca_files)
         _window_size(self.profile, b.screen_width, b.screen_height)
         self._pw = await async_playwright().start()
-        prefs = {**BASE_PREFS, **b.firefox_prefs}
+        # The languages as a person's Firefox has them: from its own pref, not
+        # Playwright's locale override, which makes navigator.languages one tag
+        # and the Accept-Language header that tag without q-values (the
+        # package's Firefox has Juggler patched so no override is set).
+        env["LANG"] = posix_locale(b.locale)
+        env.pop("LC_ALL", None)
+        prefs = {**BASE_PREFS, "intl.accept_languages": accept_languages(b.locale), **b.firefox_prefs}
         try:
             self._ctx = await self._pw.firefox.launch_persistent_context(
                 str(self.profile),
@@ -155,7 +189,6 @@ class Browser:
                 no_viewport=not b.headless,
                 viewport={"width": b.screen_width, "height": b.screen_height - 120} if b.headless else None,
                 screen={"width": b.screen_width, "height": b.screen_height} if b.headless else None,
-                locale=b.locale,
                 timezone_id=b.timezone or None,
                 proxy={"server": f"http://127.0.0.1:{self.egress.port}"},
                 firefox_user_prefs=prefs,
@@ -177,8 +210,11 @@ class Browser:
         self._page.on("response", self._on_response)
         # One tab: a popup or a target=_blank is closed as it opens.
         self._ctx.on("page", lambda p: asyncio.ensure_future(p.close()) if p is not self._page else None)
-        size = await self._page.evaluate("() => [window.innerWidth, window.innerHeight]")
+        size, lang = await self._page.evaluate("() => [[window.innerWidth, window.innerHeight], navigator.language]")
         self.viewport = (size[0], size[1])
+        if lang == "undefined":
+            log.warning("navigator.language is 'undefined': this Firefox's Juggler isn't patched as the "
+                        "package's is (nix/package.nix), so the locale override hides intl.accept_languages")
         self.current_links = set()
         log.info("browser started (profile %s, viewport %sx%s)", self.profile, *self.viewport)
         if self._idle_task is None or self._idle_task.done():
