@@ -221,6 +221,46 @@ async def test_site_search_recipe(service, site, tmp_path):
     svc = await service(cfg)
     r = await svc.site_search("shop", "widgets", "t")
     assert r.text == "widgets"
+    assert r.note is None and "note" not in r.as_dict()
+    lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
+    assert [l["outcome"] for l in lines] == ["ok", "ok"]
+
+
+async def test_a_stale_recipe_falls_back_to_the_generic_search_box(service, site, tmp_path):
+    """The recipe's selector is gone (Scorptec's SLI box became Unbxd's
+    input[name="q"]): the generic box is used, and logged, counted and noted."""
+    site.pages["/start"] = '<title>Start</title><form action="/search"><input id="new" name="q"></form>'
+    site.pages["/search"] = lambda q: f"<title>Found</title><p>{q['q'][0]}</p>"
+    cfg = config(tmp_path)
+    cfg.sites["shop"] = Site(url=site.base + "/start", input="#sli_search_1")
+    svc = await service(cfg)
+    r = await svc.site_search("shop", "widgets", "t")
+    assert r.text == "widgets"
+    assert r.note.startswith("recipe_stale: shop's input selector #sli_search_1 matched nothing")
+    assert 'input[name="q"]' in r.note and r.as_dict()["note"] == r.note
+    lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
+    assert [l["outcome"] for l in lines] == ["ok", "recipe_stale"]
+    assert lines[-1]["detail"] == r.note
+    assert 'browser_mcp_pages_total{outcome="recipe_stale",tool="site_search"} 1.0' in \
+        svc.pagelog.exposition().decode()
+
+
+async def test_a_broken_recipe_says_recipe_broken(service, site, tmp_path):
+    site.pages["/start"] = '<title>Start</title><p>no search here</p>'
+    cfg = config(tmp_path)
+    cfg.sites["shop"] = Site(url=site.base + "/start", input="#sli_search_1")
+    svc = await service(cfg)
+    with pytest.raises(ToolRefused, match=r"^recipe_broken: shop's search box isn't on .*/start: "
+                                          r"neither its input selector \(#sli_search_1\)"):
+        await svc.site_search("shop", "widgets", "t")
+    lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
+    assert [l["outcome"] for l in lines] == ["ok", "recipe_broken"]
+    assert 'browser_mcp_pages_total{outcome="recipe_broken",tool="site_search"} 1.0' in \
+        svc.pagelog.exposition().decode()
+    # A host name with no recipe has none to be broken: the refusal is as it was.
+    del cfg.sites["shop"]
+    with pytest.raises(ToolRefused, match="^no search box found on"):
+        await svc.site_search(site.base + "/start", "widgets", "t")
 
 
 async def test_search_with_a_configured_engine(service, site, tmp_path):

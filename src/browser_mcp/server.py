@@ -105,6 +105,8 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             "Search within one site: the query is typed into the site's own search box, and "
             "the results page comes back as `browse` returns it. site: a configured site "
             f"({sites}), or any host name (its home page's first search box is used). "
+            "A refusal starting `recipe_broken:` means the site's configured search box is gone: "
+            "browse its search URL instead. "
             f"Usually two pages against the limits. {UNTRUSTED}"))
     async def site_search(site: str, query: str, ctx: Context = None) -> list:
         try:

@@ -144,9 +144,12 @@ class PageResult:
     truncated: dict[str, int] = field(default_factory=dict)
     challenge: dict[str, Any] | None = None
     screenshot: str | None = None  # base64
+    note: str | None = None  # e.g. recipe_stale: the configured search box is gone
 
     def as_dict(self) -> dict[str, Any]:
         d = {"url": self.url, "final_url": self.final_url, "status": self.status, "title": self.title}
+        if self.note:
+            d["note"] = self.note
         if self.challenge:
             d["challenge"] = self.challenge
         d["text"] = self.text
@@ -227,9 +230,11 @@ class Service:
             self.pending = None
             page = await self.browser.page()
             result = await self._search_box(page, eng.url, [eng.input] if eng.input else GENERIC_SEARCH_INPUT,
-                                            query, caller, "search")
+                                            query, caller, "search", recipe=name if eng.input else None)
             out: dict[str, Any] = {"engine": name, "query": query, "url": result.final_url,
                                    "status": result.status}
+            if result.note:
+                out["note"] = result.note
             if result.challenge:
                 out["challenge"] = result.challenge
                 out["results"] = []
@@ -240,13 +245,14 @@ class Service:
             return out, result.screenshot
 
     async def site_search(self, site: str, query: str, caller: str) -> PageResult:
-        recipe = self._recipe(site)
+        name, recipe = self._recipe(site)
         async with self.browser.lock:
             self._not_with_human()  # under the lock: ask_human may have just handed it over
             self.pending = None
             page = await self.browser.page()
             selectors = [recipe.input] if recipe.input else GENERIC_SEARCH_INPUT
-            result = await self._search_box(page, recipe.url, selectors, query, caller, "site_search")
+            result = await self._search_box(page, recipe.url, selectors, query, caller, "site_search",
+                                            recipe=name if recipe.input else None)
             if result.challenge is None:
                 await self._extract(page, result)
             self.browser.touch()
@@ -489,17 +495,18 @@ class Service:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self.pending.watcher
 
-    def _recipe(self, site: str) -> Site:
+    def _recipe(self, site: str) -> tuple[str, Site]:
+        """The site's recipe and its name (a bare host's is the host)."""
         if site in self.cfg.sites:
-            return self.cfg.sites[site]
+            return site, self.cfg.sites[site]
         url = site if "://" in site else f"https://{site.strip('/')}/"
         host = urlsplit(url).hostname
         if not host:
             raise ToolRefused(f"{site!r} is neither a configured site nor a host name")
-        for recipe in self.cfg.sites.values():
+        for name, recipe in self.cfg.sites.items():
             if site_of(urlsplit(recipe.url).hostname or "") == site_of(host):
-                return recipe
-        return Site(url=url)
+                return name, recipe
+        return host, Site(url=url)
 
     # Pages.
 
@@ -563,10 +570,14 @@ class Service:
                 await asyncio.sleep(0.5)
 
     async def _search_box(self, page: Page, start_url: str, selectors: list[str], query: str,
-                          caller: str, tool: str) -> PageResult:
+                          caller: str, tool: str, recipe: str | None = None) -> PageResult:
         """Type the query into the site's search box, from its start page
-        (or the page the tab is on, if it's the same site and has the box)."""
-        box = None
+        (or the page the tab is on, if it's the same site and has the box).
+        recipe: the site's or engine's name, when the selectors are its own
+        configured ones: if they match nothing, the generic search box is
+        tried (recipe_stale), and with none either the refusal starts
+        `recipe_broken:`, a stable prefix callers match on."""
+        box, stale = None, None
         start_site = site_of(urlsplit(start_url).hostname or "")
         if page.url.startswith("http") and site_of(urlsplit(page.url).hostname or "") == start_site:
             box = await self._find_input(page, selectors, wait=False)
@@ -575,6 +586,18 @@ class Service:
             if first.challenge:
                 return first
             box = await self._find_input(page, selectors, wait=True)
+            if box is None and recipe is not None:
+                box, used = await self._find_input(page, GENERIC_SEARCH_INPUT, wait=False, which=True)
+                tried = ", ".join(selectors)
+                if box is None:
+                    why = (f"recipe_broken: {recipe}'s search box isn't on {page.url}: neither its input "
+                           f"selector ({tried}) nor a generic search box matched")
+                    self.pagelog.page(caller=caller, tool=tool, url=start_url, final_url=page.url,
+                                      outcome="recipe_broken", detail=why)
+                    raise ToolRefused(why)
+                stale = (f"recipe_stale: {recipe}'s input selector {tried} matched nothing on {page.url}; "
+                         f"the generic search box ({used}) was used")
+                log.warning("%s", stale)
             if box is None:
                 raise ToolRefused(f"no search box found on {page.url} (selectors: {', '.join(selectors)})")
         human = self._human(page)
@@ -603,7 +626,9 @@ class Service:
             at = page.url
             await self._blank(page)
             self._failed_page(at, here, caller, tool)
-        return await self._settle(page, here, responses[-1] if responses else None, caller, tool)
+        result = await self._settle(page, here, responses[-1] if responses else None, caller, tool, stale=stale)
+        result.note = stale
+        return result
 
     async def _left(self, page: Page, url: str, timeout: float) -> bool:
         try:
@@ -623,7 +648,9 @@ class Service:
                           detail="the search didn't submit")
         raise ToolRefused(f"the search didn't load a results page (the tab was at {at})")
 
-    async def _find_input(self, page: Page, selectors: list[str], wait: bool):
+    async def _find_input(self, page: Page, selectors: list[str], wait: bool, which: bool = False):
+        """The first visible, editable match; with which, also the selector
+        that matched it."""
         deadline = time.monotonic() + (8 if wait else 0)
         while True:
             for sel in selectors:
@@ -632,11 +659,11 @@ class Service:
                     for i in range(min(await loc.count(), 5)):
                         el = loc.nth(i)
                         if await el.is_visible() and await el.is_editable():
-                            return el
+                            return (el, sel) if which else el
                 except PlaywrightError:
                     continue
             if time.monotonic() >= deadline:
-                return None
+                return (None, None) if which else None
             await asyncio.sleep(0.5)
 
     def _failed(self, e: PlaywrightError, started: float, caller: str, tool: str, url: str):
@@ -655,9 +682,11 @@ class Service:
         self.pagelog.page(caller=caller, tool=tool, url=url, outcome="error", detail=msg)
         raise ToolRefused(f"the page didn't load: {msg}") from None
 
-    async def _settle(self, page: Page, url: str, response: Response | None, caller: str, tool: str) -> PageResult:
+    async def _settle(self, page: Page, url: str, response: Response | None, caller: str, tool: str,
+                      stale: str | None = None) -> PageResult:
         """After a navigation: let it load, dwell, deal with a challenge, check
-        where it ended up, and log it."""
+        where it ended up, and log it (as recipe_stale, with stale, if it
+        would be ok)."""
         with contextlib.suppress(Exception):
             await page.wait_for_load_state("load", timeout=10_000)
         human = self._human(page)
@@ -704,6 +733,8 @@ class Service:
                 "type, ask_human for a person, resume once it's gone), until the next page load.")}
             result.screenshot = await challenge.widget_screenshot(page, ch)
             self.pending = Pending(ch.kind, url, caller)
+        elif stale:
+            outcome, detail = "recipe_stale", stale
         try:
             if page.url.startswith("http"):
                 self.guard.check_url(page.url)

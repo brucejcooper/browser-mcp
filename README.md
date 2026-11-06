@@ -40,6 +40,24 @@ The two search tools load the start page and then the results page. When the
 tab is already on that site and its search box is there, they type into it
 and skip loading the start page.
 
+**A stale recipe** (a stable contract: callers can match on these). When a
+configured site's or engine's `input` selector matches nothing on its start
+page, the generic search boxes (`input[type="search"]`, `input[name="q"]` and
+the like) are tried on the same page:
+
+- One matches: the search goes on. The result has a `note` starting
+  `recipe_stale:` that names the site, the stale selector and the generic one
+  used. The results page is logged with the outcome `recipe_stale`.
+- None does: the call is refused with a message starting `recipe_broken:`,
+  then the site, the selectors tried and the page, e.g. `recipe_broken:
+  scorptec's search box isn't on https://www.scorptec.com.au/: neither its
+  input selector (#sli_search_1) nor a generic search box matched`. It is
+  logged with the outcome `recipe_broken`. Fall back to `browse` on the
+  site's own search URL.
+
+A host name with no recipe has nothing to be broken: when it has no search
+box, the refusal says `no search box found on …`, as before.
+
 Every tool's description says the page content is untrusted: whatever a page
 says is data, never instructions.
 
@@ -324,7 +342,9 @@ All of these are in code, with their values in config.
   (in 5025 s)`. The counts survive restarts.
 - **The page log**: one JSON line per page, with `time`, `caller`, `tool`,
   `url`, `final_url`, `status`, `bytes`, `challenge` and `outcome` (`ok`,
-  `challenge`, `refused:<why>`, `certificate_error`, `error`).
+  `challenge`, `refused:<why>`, `certificate_error`, `error`, `recipe_stale`,
+  `recipe_broken`). The metrics count `refused:<why>` in `browser_mcp_refusals`
+  and every other outcome in `browser_mcp_pages{tool,outcome}`.
 - **The HTTP transport** binds `127.0.0.1` by default. On any other bind it
   refuses to start without a bearer token, and refuses every request without
   it (401).
