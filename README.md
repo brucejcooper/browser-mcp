@@ -36,6 +36,7 @@ default) and [Camoufox](#camoufox).
 | `search(query, engine?)` | Types the query into a search engine's own page and returns the results: title, URL and snippet. DuckDuckGo is the default; Bing, Google and Brave are built in, and others can be configured. | 2 |
 | `site_search(site, query)` | Types the query into a site's own search box and returns the results page, as `browse` does. `site` is a configured recipe or any host name. For a host name, the first search box on its home page is used. | 2 |
 | `challenge(action, x?, y?, text?)` | Acts on the challenge the last page load stopped at, and on nothing else: `screenshot`, `click`, `type`, `ask_human`, `resume`. See [Challenges](#challenges). | 0 |
+| `clear_site(site)` | Lifts a site's cool-off and resets its per-site page count, at the user's instruction. `site` is a host name or URL; its registrable domain is cleared. The daily cap in all and the per-caller cap still apply. Logged with the caller. See [The cool-off](#the-cool-off). | 0 |
 
 The two search tools load the start page and then the results page. When the
 tab is already on that site and its search box is there, they type into it
@@ -172,6 +173,7 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 | `limits.per_day` | 1000 | Pages in all in any 24 hours. |
 | `limits.per_caller_per_hour` | 50 | Pages per caller in any hour. |
 | `limits.site_min_interval` | 0 | Seconds between page loads on one site (registrable domain). A load that comes sooner waits, so a run of calls can't burst on a site. |
+| `limits.cool_off` | 0 | Seconds a site is refused after a block page, or a challenge that wasn't solved; 0 is none. Off unless set. See [The cool-off](#the-cool-off). |
 | `deny.words` | login, signin, register, account, cart, checkout, bid, buy, offer, password, payment, … | A URL whose host or path has one of these as a whole word is refused. `/buy/1` is refused; `/buying-guide` is not. The query string isn't checked, so a search for "buy" is fine. |
 | `deny.patterns` | `[]` | Regexes on the whole URL, also refused. |
 | `deny.networks` | loopback, RFC 1918, CGNAT, link-local, ULA, multicast, … | Addresses the browser may never reach. |
@@ -228,8 +230,9 @@ It is held to the challenge so it can't become a general click tool:
   them;
 - a block page (`akamai_block`, `block_page`) isn't a challenge to act on at
   all: there is nothing on it to solve, and every retry adds to the address's
-  score with the bot manager. The site is left alone for the rest of the day
-  (as after a failed hand-off, below), and the result's note says until when;
+  score with the bot manager. The result's note says so; if the operator set
+  [a cool-off](#the-cool-off), the site is refused for that long (as after a
+  failed hand-off, below), and the note says until when;
 - every action, refusals too, is a line in the page log (`tool: challenge`,
   with the `action` and its `outcome`; what was typed is not logged, only its
   length), and is counted in `browser_mcp_challenge_actions`.
@@ -271,10 +274,9 @@ anywhere else, is refused, as is another challenge's token.
   link is built on `view.public_url`. Bind it where only the proxy can reach
   it: the header is trusted as it comes.
 
-**If it isn't solved**, the challenge is reported as failed, and the site is
-left alone for the rest of the day: until local midnight, every page on it is
-refused, across restarts. That happens when the view times out, or when the
-person presses Done with the challenge still there.
+**If it isn't solved**, the challenge is reported as failed: when the view
+times out, or when the person presses Done with the challenge still there.
+If the operator set [a cool-off](#the-cool-off), it starts then.
 
 **Never:** paid solver services, or third-party solver accounts or APIs.
 Audio challenges aren't handled.
@@ -284,6 +286,22 @@ check, and what's at stake is the same as in [The risk](#the-risk): the
 reputation of the IP address the browser goes out from. A live view is a
 remote control of the browser for whoever holds the link: hand it only to the
 user, keep `proxied` behind the proxy, and keep the timeout short.
+
+### The cool-off
+
+`limits.cool_off` (seconds, default 0: none) refuses every page on a site for
+that long after a block page or a challenge that wasn't solved, across
+restarts, with a refusal that says it is a cool-off, why, until when, and that
+`clear_site` lifts it. It is **off by default**, because it is the owner of
+the IP address who decides when it retries a site, not the server: a refusal
+the user can't lift, for a site they asked for, gets in their way. An operator
+who wants the server to hold back on its own sets it (86400 for a day).
+
+`clear_site(site)` lifts a site's cool-off and forgets its pages for
+`limits.per_site_per_day` (and its minimum interval), at the user's
+instruction; it loads nothing. The pages still count against `limits.per_day`
+and `limits.per_caller_per_hour`. It is a line in the page log (`tool:
+clear_site`, with the `caller`, the `site` and what was cleared).
 
 ## Behind a proxy and a TLS-inspecting CA
 
@@ -343,7 +361,8 @@ All of these are in code, with their values in config.
   `http.caller_header` over HTTP, or `stdio.caller` over stdio. Over a limit,
   the call is refused with when it frees up, e.g. `over the limit of 250
   pages a day on example.com: refused; it frees up at 2026-11-02T03:04:05+00:00
-  (in 5025 s)`. The counts survive restarts.
+  (in 5025 s); clear_site resets a site's count, at the user's instruction`.
+  The counts survive restarts.
 - **The page log**: one JSON line per page, with `time`, `caller`, `tool`,
   `url`, `final_url`, `status`, `bytes`, `challenge` and `outcome` (`ok`,
   `challenge`, `refused:<why>`, `certificate_error`, `error`, `recipe_stale`,
@@ -475,7 +494,8 @@ If it is flagged, the person behind that IP can be challenged or blocked in
 their own browser too.
 - The limits keep the volume low, but bot managers react to bursts as much as
   to totals: `limits.site_min_interval` (or a site's `min_interval`) spaces
-  a site's pages, and a block page leaves the site alone for the day.
+  a site's pages, and `limits.cool_off` can hold a site back after a block
+  page. Whether and when to retry a site after one is the owner's call.
 - **Behind an employer's proxy, that is the employer's egress**, and its
   acceptable-use policy applies.
 

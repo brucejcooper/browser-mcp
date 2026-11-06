@@ -82,32 +82,66 @@ async def test_pace_spaces_page_actions(monkeypatch):
     assert 0.19 <= time.monotonic() - t0 <= 0.5
 
 
-def test_a_site_left_alone_is_refused_until_midnight_and_it_persists(tmp_path):
-    from datetime import datetime
+def test_no_cool_off_by_default(tmp_path):
+    limits = Limits(LimitsConfig(), tmp_path / "limits.json", clock=Clock())
+    assert limits.leave_alone("shop.example.com") is None
+    limits.check("c", "www.example.com")
+    assert not Limits(LimitsConfig(), tmp_path / "limits.json", clock=Clock()).left_alone
+
+
+def test_a_site_in_a_cool_off_is_refused_for_it_and_it_persists(tmp_path):
     clock = Clock()
     state = tmp_path / "limits.json"
-    limits = Limits(LimitsConfig(), state, clock=clock)
+    limits = Limits(LimitsConfig(cool_off=3600), state, clock=clock)
     until = limits.leave_alone("shop.example.com")
-    end = datetime.fromtimestamp(until).astimezone()
-    assert (end.hour, end.minute, end.second) == (0, 0, 0)
-    assert 0 < until - clock.t <= DAY
-    with pytest.raises(LimitExceeded, match=r"example.com is left alone until \S+ \(in \d+ s\): a challenge there"):
+    assert until == clock.t + 3600
+    with pytest.raises(LimitExceeded, match=r"example.com is in a cool-off until \S+ \(in \d+ s\): a challenge there.*"
+                                            r"clear_site lifts it"):
         limits.check("c", "www.example.com")
     limits.check("c", "www.example.org")
-    again = Limits(LimitsConfig(), state, clock=clock)
-    with pytest.raises(LimitExceeded, match="left alone"):
+    again = Limits(LimitsConfig(cool_off=3600), state, clock=clock)
+    with pytest.raises(LimitExceeded, match="cool-off"):
         again.check("c", "example.com")
     clock.t = until + 1
     again.check("c", "example.com")
 
 
-def test_a_site_left_alone_says_why(tmp_path):
+def test_a_cool_off_already_in_place_still_applies_with_none_set(tmp_path):
     clock = Clock()
     state = tmp_path / "limits.json"
-    Limits(LimitsConfig(), state, clock=clock).leave_alone("www.example.com", "it answered with a block page today")
+    Limits(LimitsConfig(cool_off=DAY), state, clock=clock).leave_alone("www.example.com")
+    with pytest.raises(LimitExceeded, match="cool-off"):
+        Limits(LimitsConfig(), state, clock=clock).check("c", "example.com")
+
+
+def test_a_site_in_a_cool_off_says_why(tmp_path):
+    clock = Clock()
+    state = tmp_path / "limits.json"
+    Limits(LimitsConfig(cool_off=DAY), state, clock=clock).leave_alone("www.example.com", "it answered with a block page")
     again = Limits(LimitsConfig(), state, clock=clock)
-    with pytest.raises(LimitExceeded, match=r"example.com is left alone until \S+ \(in \d+ s\): it answered with a block page"):
+    with pytest.raises(LimitExceeded, match=r"example.com is in a cool-off until \S+ \(in \d+ s\): it answered with a block page"):
         again.check("c", "shop.example.com")
+
+
+def test_clear_site_lifts_the_cool_off_and_the_site_count_only(tmp_path):
+    clock = Clock()
+    state = tmp_path / "limits.json"
+    limits = Limits(LimitsConfig(cool_off=DAY, per_site_per_day=2, per_day=5), state, clock=clock)
+    fill(limits, 2)
+    fill(limits, 1, host="www.example.org")
+    with pytest.raises(LimitExceeded, match="2 pages a day on example.com.*clear_site"):
+        limits.check("c", "www.example.com")
+    limits.leave_alone("www.example.com")
+    out = limits.clear_site("shop.example.com")
+    assert out["site"] == "example.com" and out["pages_cleared"] == 2 and out["was_in_cool_off_until"]
+    again = Limits(LimitsConfig(cool_off=DAY, per_site_per_day=2, per_day=5), state, clock=clock)
+    fill(again, 2)  # through: no cool-off, and the site's count starts again
+    assert len(again.all) == 5  # but every page still counts in all
+    assert len(again.sites["example.org"]) == 1
+    with pytest.raises(LimitExceeded, match="5 pages a day in all"):
+        again.check("c", "www.example.net")
+    assert again.clear_site("example.net") == {"site": "example.net", "was_in_cool_off_until": None,
+                                               "pages_cleared": 0}
 
 
 async def test_space_waits_out_a_sites_min_interval(monkeypatch):

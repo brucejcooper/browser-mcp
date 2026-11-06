@@ -9,6 +9,7 @@ def test_defaults():
     assert cfg.limits.per_day == 1000
     assert cfg.limits.per_caller_per_hour == 50
     assert (cfg.limits.delay_min, cfg.limits.delay_max) == (2.0, 3.0)
+    assert cfg.limits.cool_off == 0
     assert cfg.http.host == "127.0.0.1"
     assert cfg.search.default == "duckduckgo"
     assert "127.0.0.0/8" in cfg.deny.networks and "fc00::/7" in cfg.deny.networks
@@ -41,6 +42,9 @@ input = "#q"
     assert cfg.sites["example"].input == "#q"
     f.write_text("[limits]\nper_dya = 1\n")
     with pytest.raises(ConfigError, match="per_dya"):
+        load(f, env={})
+    f.write_text("[limits]\ncool_off = -1\n")
+    with pytest.raises(ConfigError, match="limits.cool_off: must not be negative"):
         load(f, env={})
     f.write_text('[limits]\nper_day = "many"\n')
     with pytest.raises(ConfigError, match="expected int"):

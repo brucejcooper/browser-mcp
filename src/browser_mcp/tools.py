@@ -122,7 +122,7 @@ class Pending:
     view: LiveView | None = None
     watcher: asyncio.Task | None = None
     ended: str | None = None  # how the hand-off ended: done, cleared, timeout or closed
-    failed: str | None = None  # why it failed, if it did: the site is left alone
+    failed: str | None = None  # why it failed, if it did: the site's cool-off starts, if there is one
 
     @property
     def with_human(self) -> bool:
@@ -427,8 +427,7 @@ class Service:
             elif ended == "done" and await self._still_there():
                 pend.failed = "the person closed the live view with the challenge still there"
             if pend.failed:
-                until = self.limits.leave_alone(urlsplit(pend.url).hostname or "")
-                pend.failed += f"; {site_of(urlsplit(pend.url).hostname or '')} is left alone until {_iso(until)}"
+                pend.failed += self._cool_off(urlsplit(pend.url).hostname or "")
             # Only now: until here the browser is still the person's.
             pend.ended = ended
             self.pagelog.action(caller=pend.caller, action="ask_human", url=pend.url, challenge=pend.kind,
@@ -464,10 +463,9 @@ class Service:
         if ch is not None:
             if pend.ended == "done":
                 # The watcher saw it gone at Done, but it's back.
-                until = self.limits.leave_alone(urlsplit(pend.url).hostname or "")
+                cool = self._cool_off(urlsplit(pend.url).hostname or "")
                 self.pending = None
-                refuse(f"failed: the person closed the live view with the challenge still there; "
-                       f"{site_of(urlsplit(pend.url).hostname or '')} is left alone until {_iso(until)}",
+                refuse(f"failed: the person closed the live view with the challenge still there{cool}",
                        "failed:not_cleared")
             refuse(f"the challenge ({ch.kind}) is still there: screenshot to see it, or ask_human",
                    "refused:still_there")
@@ -531,6 +529,27 @@ class Service:
         await self.limits.space(host, self._min_interval(host))
         await self.limits.pace()
         self.limits.record(caller, host)
+
+    def _cool_off(self, host: str, why: str = "") -> str:
+        """Start the site's cool-off, if the operator set one: what to add to
+        the note, or "" if none."""
+        until = self.limits.leave_alone(host, why)
+        if until is None:
+            return ""
+        return (f"; {site_of(host)} is in a cool-off until {_iso(until)}: every page on it is refused "
+                "until then, unless clear_site lifts it at the user's instruction")
+
+    def clear_site(self, site: str, caller: str) -> dict[str, Any]:
+        """Lift a site's cool-off and reset its per-site count."""
+        host = urlsplit(site).hostname if "://" in site else site.strip().split("/")[0]
+        if not host:
+            raise ToolRefused(f"{site!r} is not a host name or URL")
+        out = self.limits.clear_site(host)
+        self.pagelog.action(caller=caller, tool="clear_site", action="clear_site", url=None, challenge=None,
+                            outcome="ok", site=out["site"],
+                            detail=f"{out['site']}: cool-off until {out['was_in_cool_off_until']}, "
+                                   f"{out['pages_cleared']} pages cleared")
+        return out
 
     def _min_interval(self, host: str) -> float:
         """The seconds between page loads on this host's site: its recipe's,
@@ -717,14 +736,14 @@ class Service:
         outcome, detail = "ok", None
         if ch is not None and ch.kind in BLOCKS:
             # Nothing to solve, and every retry adds to the address's score
-            # with the bot manager: leave the site alone for the day.
+            # with the bot manager: a cool-off, if the operator set one.
             outcome = "challenge"
             host = urlsplit(url).hostname or ""
-            until = self.limits.leave_alone(host, f"it answered with a block page ({ch.kind}) today")
-            detail = f"{site_of(host)} left alone until {_iso(until)}"
+            cool = self._cool_off(host, f"it answered with a block page ({ch.kind})")
+            detail = cool.removeprefix("; ") or None
             result.challenge = {"kind": ch.kind, "note": (
-                "A block page: there is nothing on it to solve, and every retry makes it worse. "
-                f"{site_of(host)} is left alone until {_iso(until)}: every page on it is refused until then.")}
+                "A block page: there is nothing on it to solve, and retrying soon tends to make it worse"
+                + (cool or ". When to retry is the user's call") + ".")}
             result.screenshot = await challenge.widget_screenshot(page, ch)
         elif ch is not None:
             outcome = "challenge"

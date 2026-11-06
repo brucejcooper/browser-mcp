@@ -29,6 +29,7 @@ per_site_per_day = 250    # per registrable domain
 per_day = 1000
 per_caller_per_hour = 50
 site_min_interval = 0     # seconds between page loads on one site; a sooner one waits
+cool_off = 0              # seconds a site is refused after a block page; 0: none (clear_site lifts it)
 
 [deny]
 # words = [...]           # the URL deny list; the default refuses login,

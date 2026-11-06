@@ -118,6 +118,9 @@ class LimitsConfig:
     per_day: int = 1000
     per_caller_per_hour: int = 50
     site_min_interval: float = 0.0  # seconds between page loads on one site, waited out
+    # Seconds a site is refused after a block page, or a challenge that wasn't
+    # solved; 0: none. Off unless the operator sets it; clear_site lifts it.
+    cool_off: float = 0.0
 
 
 @dataclass
@@ -267,7 +270,7 @@ def validate(cfg: Config) -> None:
     lim = cfg.limits
     if not 0 <= lim.delay_min <= lim.delay_max:
         raise ConfigError("limits: delay_min must be between 0 and delay_max")
-    for name in ("per_site_per_day", "per_day", "per_caller_per_hour", "site_min_interval"):
+    for name in ("per_site_per_day", "per_day", "per_caller_per_hour", "site_min_interval", "cool_off"):
         if getattr(lim, name) < 0:
             raise ConfigError(f"limits.{name}: must not be negative")
     for name, site in cfg.sites.items():

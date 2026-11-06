@@ -1,8 +1,9 @@
 """The page limits: per site (registrable domain) and in all per day, and per
 caller per hour, as sliding windows, kept in the state directory across
-restarts; the sites left alone for the day after a challenge that wasn't
-solved, or a block page. And the spacing: the jittered gap between page
-actions, and a site's minimum interval between its page loads."""
+restarts; the sites in a cool-off for limits.cool_off seconds, if the operator
+set one, after a challenge that wasn't solved, or a block page. And the
+spacing: the jittered gap between page actions, and a site's minimum interval
+between its page loads."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import logging
 import random
 import time
 from collections import defaultdict
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -36,7 +37,7 @@ def site_of(host: str) -> str:
     return r.top_domain_under_public_suffix or host.lower().rstrip(".")
 
 
-UNSOLVED = "a challenge there wasn't solved today"
+UNSOLVED = "a challenge there wasn't solved"
 
 
 class LimitExceeded(Refused):
@@ -75,12 +76,13 @@ class Limits:
         if site in self.left_alone:
             when = datetime.fromtimestamp(self.left_alone[site], timezone.utc).isoformat(timespec="seconds")
             why = self.left_alone_why.get(site, UNSOLVED)
-            raise LimitExceeded(f"{site} is left alone until {when} (in {int(self.left_alone[site] - now) + 1} s): "
-                                f"{why}")
-        for times, cap, window, what in (
-            (self.callers.get(caller, []), self.cfg.per_caller_per_hour, HOUR, f"{self.cfg.per_caller_per_hour} pages an hour for caller {caller!r}"),
-            (self.sites.get(site, []), self.cfg.per_site_per_day, DAY, f"{self.cfg.per_site_per_day} pages a day on {site}"),
-            (self.all, self.cfg.per_day, DAY, f"{self.cfg.per_day} pages a day in all"),
+            raise LimitExceeded(f"{site} is in a cool-off until {when} (in {int(self.left_alone[site] - now) + 1} s): "
+                                f"{why}; clear_site lifts it, at the user's instruction")
+        for times, cap, window, what, lift in (
+            (self.callers.get(caller, []), self.cfg.per_caller_per_hour, HOUR, f"{self.cfg.per_caller_per_hour} pages an hour for caller {caller!r}", ""),
+            (self.sites.get(site, []), self.cfg.per_site_per_day, DAY, f"{self.cfg.per_site_per_day} pages a day on {site}",
+             "; clear_site resets a site's count, at the user's instruction"),
+            (self.all, self.cfg.per_day, DAY, f"{self.cfg.per_day} pages a day in all", ""),
         ):
             if len(times) >= cap:
                 # The page that frees one up is the oldest that still counts.
@@ -88,7 +90,7 @@ class Limits:
                 when = (datetime.fromtimestamp(frees, timezone.utc).isoformat(timespec="seconds")
                         if frees else "never (the cap is 0)")
                 wait = f" (in {int(frees - now) + 1} s)" if frees else ""
-                raise LimitExceeded(f"over the limit of {what}: refused; it frees up at {when}{wait}")
+                raise LimitExceeded(f"over the limit of {what}: refused; it frees up at {when}{wait}{lift}")
 
     def record(self, caller: str, host: str) -> None:
         now = self.clock()
@@ -97,16 +99,31 @@ class Limits:
         self.callers[caller].append(now)
         self._save()
 
-    def leave_alone(self, host: str, why: str = "") -> float:
-        """No more pages on this site until the end of the (local) day."""
-        now = self.clock()
-        today = datetime.fromtimestamp(now).astimezone()
-        midnight = datetime.combine(today.date() + timedelta(days=1), dtime(), today.tzinfo)
-        until = midnight.timestamp()
+    def leave_alone(self, host: str, why: str = "") -> float | None:
+        """No more pages on this site for limits.cool_off seconds: when it
+        ends, or None if there is no cool-off (the default)."""
+        if self.cfg.cool_off <= 0:
+            return None
+        until = self.clock() + self.cfg.cool_off
         self.left_alone[site_of(host)] = until
         self.left_alone_why[site_of(host)] = why or UNSOLVED
         self._save()
         return until
+
+    def clear_site(self, host: str) -> dict:
+        """Lift the site's cool-off and forget its pages (its count against
+        per_site_per_day, and its minimum interval). The pages still count in
+        all and per caller."""
+        now = self.clock()
+        self._prune(now)
+        site = site_of(host)
+        until = self.left_alone.pop(site, None)
+        self.left_alone_why.pop(site, None)
+        pages = len(self.sites.pop(site, []))
+        self._save()
+        return {"site": site, "was_in_cool_off_until":
+                datetime.fromtimestamp(until, timezone.utc).isoformat(timespec="seconds") if until else None,
+                "pages_cleared": pages}
 
     async def space(self, host: str, interval: float) -> None:
         """Wait until the site's last page load is at least interval seconds

@@ -7,6 +7,7 @@ import shutil
 import pytest
 
 from browser_mcp.config import Config, Engine, Site
+from browser_mcp.limits import LimitExceeded, Limits
 from browser_mcp.server import build
 from browser_mcp.tools import ToolRefused
 
@@ -128,29 +129,60 @@ async def test_the_fingerprint_is_a_persons_firefox(service, site, tmp_path):
     assert env["own"] == "function own() { return 1; }"
 
 
-async def test_a_block_page_leaves_the_site_alone(service, site, tmp_path):
-    """Nothing on a block page to solve, and a retry only adds to the score:
-    the site is refused for the rest of the day, and the result says so."""
+def _block_page(site):
     site.pages["/"] = (403, {"Server": "AkamaiGHost"},
                        "<title>Access Denied</title><h1>Access Denied</h1>"
                        "<p>You don't have permission to access this server.</p><p>Reference #18.abc</p>")
     site.pages["/other"] = PAGE
+
+
+async def test_a_block_page_is_reported_and_the_site_not_refused_by_default(service, site, tmp_path):
+    """No cool-off unless the operator sets one: when to retry is the user's call."""
+    _block_page(site)
     svc = await service()
     r = await svc.browse(site.base + "/", "t")
     assert r.challenge["kind"] == "akamai_block"
-    assert "127.0.0.1 is left alone until" in r.challenge["note"]
+    assert "cool-off" not in r.challenge["note"] and "the user's call" in r.challenge["note"]
     assert svc.pending is None  # nothing for challenge() to act on
+    r = await svc.browse(site.base + "/other", "t")
+    assert r.challenge is None and r.title == "Fixture"
+    lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
+    assert [l["outcome"] for l in lines] == ["challenge", "ok"]
+
+
+async def test_a_block_page_starts_the_cool_off_set_and_clear_site_lifts_it(service, site, tmp_path):
+    """With limits.cool_off set: nothing on a block page to solve, and a retry
+    only adds to the score, so the site is refused for that long, and the
+    result says so; clear_site, at the user's instruction, lifts it."""
+    _block_page(site)
+    svc = await service(config(tmp_path, cool_off=3600))
+    r = await svc.browse(site.base + "/", "t")
+    assert r.challenge["kind"] == "akamai_block"
+    assert "127.0.0.1 is in a cool-off until" in r.challenge["note"] and "clear_site" in r.challenge["note"]
+    assert svc.pending is None
     with pytest.raises(ToolRefused, match="no challenge"):
         await svc.challenge("screenshot", "t")
     seen = len(site.requests)
-    with pytest.raises(ToolRefused, match=r"left alone until .*: it answered with a block page \(akamai_block\)"):
+    with pytest.raises(ToolRefused, match=r"cool-off until .*: it answered with a block page \(akamai_block\); "
+                                          r"clear_site lifts it"):
         await svc.browse(site.base + "/other", "t")
     assert len(site.requests) == seen
+    again = Limits(svc.cfg.limits, tmp_path / "state" / "limits.json")  # it persists
+    with pytest.raises(LimitExceeded, match="cool-off"):
+        again.check("t", "127.0.0.1")
+    out = svc.clear_site(site.base + "/other", "majordomo")
+    assert out["site"] == "127.0.0.1" and out["pages_cleared"] == 1 and out["was_in_cool_off_until"]
+    r = await svc.browse(site.base + "/other", "t")
+    assert r.title == "Fixture"
+    assert len(svc.limits.sites["127.0.0.1"]) == 1 and len(svc.limits.all) == 2
     lines = [json.loads(l) for l in (tmp_path / "pages.log").read_text().splitlines()]
     blocked = [l for l in lines if l["outcome"] == "challenge"]
     assert len(blocked) == 1 and blocked[0]["challenge"] == "akamai_block"
-    assert "left alone until" in blocked[0]["detail"]
-    assert lines[-1]["outcome"] == "refused:limit"
+    assert "cool-off until" in blocked[0]["detail"]
+    assert lines[-3]["outcome"] == "refused:limit"
+    cleared = lines[-2]
+    assert (cleared["tool"], cleared["caller"], cleared["site"], cleared["outcome"]) == \
+        ("clear_site", "majordomo", "127.0.0.1", "ok")
 
 
 async def test_a_site_min_interval_spaces_its_page_loads(service, site, tmp_path):

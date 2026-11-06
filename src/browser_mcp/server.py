@@ -31,7 +31,9 @@ INSTRUCTIONS = f"""Browses and searches the web in a real Firefox, for occasiona
 general click, type or form tool: no logins, accounts or purchases. The
 challenge tool clicks and types only inside a bot challenge's widget, and only
 while a page is stopped at one. Pages are limited per site, per day and per
-caller; a refusal says when it frees up. {UNTRUSTED}"""
+caller; a refusal says when it frees up. A refusal for a site's cool-off or
+its per-site count can be lifted with clear_site, at the user's instruction.
+{UNTRUSTED}"""
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True, idempotentHint=False)
 
@@ -129,7 +131,8 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
             "`ask_human` opens a short-lived live view of the browser and returns its one-time link and "
             "expiry: show the link to the user. `resume`, once the challenge is gone, returns the page as "
             "`browse` does (while a person is still at it, it says so). A hand-off that times out fails, "
-            "and that site is left alone for the rest of the day. No paid or third-party solvers are used. "
+            "and, if the operator set a cool-off, that site is refused for that long (`clear_site` lifts "
+            "it). No paid or third-party solvers are used. "
             f"{UNTRUSTED}"))
     async def challenge(
         action: Literal["screenshot", "click", "type", "ask_human", "resume"],
@@ -143,6 +146,23 @@ def build(cfg: Config) -> tuple[FastMCP, Service]:
         except ToolRefused as e:
             raise ToolError(str(e)) from None
         return [text_content(out), *image(shot)]
+
+    @mcp.tool(
+        name="clear_site", structured_output=False,
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                    openWorldHint=False),
+        description=(
+            "Lift a site's cool-off and reset its per-site page count, at the user's instruction: "
+            "a refusal saying a site is in a cool-off (after a block page or an unsolved challenge, "
+            "if the operator set `limits.cool_off`), or over its pages a day, is lifted for that site. "
+            "site: a host name or URL; the whole registrable domain is cleared. It loads no page. The "
+            "daily cap in all and the per-caller cap still apply. Returns what was cleared."))
+    async def clear_site(site: str, ctx: Context = None) -> list:
+        try:
+            out = service.clear_site(site, caller_of(ctx))
+        except ToolRefused as e:
+            raise ToolError(str(e)) from None
+        return [text_content(out)]
 
     return mcp, service
 

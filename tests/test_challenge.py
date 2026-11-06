@@ -223,7 +223,9 @@ async def test_a_person_solves_it_in_the_live_view(service, site, tmp_path):
 @needs_browser
 @needs_view
 async def test_the_live_view_times_out_and_the_site_is_left_alone(service, site, tmp_path):
-    svc = await service(cfg_with_view(tmp_path, timeout=3))
+    cfg = cfg_with_view(tmp_path, timeout=3)
+    cfg.limits.cool_off = 3600
+    svc = await service(cfg)
     await _challenge_page(svc, site)
     before = listening()
     out, _ = await svc.challenge("ask_human", "t")
@@ -232,7 +234,7 @@ async def test_the_live_view_times_out_and_the_site_is_left_alone(service, site,
     assert listening() - before == set()
     with pytest.raises(ToolRefused, match="timed out"):
         await svc.challenge("resume", "t")
-    with pytest.raises(ToolRefused, match="left alone until"):
+    with pytest.raises(ToolRefused, match="cool-off until"):
         await svc.browse(site.base + "/", "t")
 
 
@@ -242,7 +244,9 @@ async def test_the_live_view_times_out_and_the_site_is_left_alone(service, site,
 async def test_done_with_the_challenge_still_there_fails(service, site, tmp_path):
     """The person opens the link in their own browser: noVNC connects, they press Done."""
     from playwright.async_api import async_playwright
-    svc = await service()
+    cfg = cfg_with_view(tmp_path)
+    cfg.limits.cool_off = 3600
+    svc = await service(cfg)
     await _challenge_page(svc, site)
     out, _ = await svc.challenge("ask_human", "t")
     async with async_playwright() as pw:
@@ -264,13 +268,13 @@ async def test_done_with_the_challenge_still_there_fails(service, site, tmp_path
             await theirs.close()
     await wait_for(lambda: svc.pending.ended is not None)
     assert svc.pending.ended == "done"
-    # Left alone already, whether or not the client ever calls resume.
-    with pytest.raises(LimitExceeded, match="left alone until"):
+    # In its cool-off already, whether or not the client ever calls resume.
+    with pytest.raises(LimitExceeded, match="cool-off until"):
         svc.limits.check("anyone", "127.0.0.1")
     assert actions(tmp_path)[-1]["outcome"] == "ended:done" and "still there" in actions(tmp_path)[-1]["detail"]
     with pytest.raises(ToolRefused, match="already been handed"):
         await svc.challenge("ask_human", "t")  # one hand-off per challenge
-    with pytest.raises(ToolRefused, match="still there; .* left alone until"):
+    with pytest.raises(ToolRefused, match="still there; .* cool-off until"):
         await svc.challenge("resume", "t")
-    with pytest.raises(ToolRefused, match="left alone until"):
+    with pytest.raises(ToolRefused, match="cool-off until"):
         await svc.browse(site.base + "/", "t")

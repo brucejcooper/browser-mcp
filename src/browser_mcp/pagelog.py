@@ -53,11 +53,12 @@ class PageLog:
             write_to_textfile(self.textfile, self.registry)
 
     def action(self, *, caller: str, action: str, url: str | None, challenge: str | None,
-               outcome: str, detail: str | None = None, **extra: Any) -> None:
-        """A challenge() action: what was done, to which challenge, and how it went."""
+               outcome: str, detail: str | None = None, tool: str = "challenge", **extra: Any) -> None:
+        """A challenge() action (or another tool's, e.g. clear_site): what was
+        done, to which challenge, and how it went."""
         entry: dict[str, Any] = {
             "time": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "caller": caller, "tool": "challenge", "action": action, "url": url,
+            "caller": caller, "tool": tool, "action": action, "url": url,
             "challenge": challenge, "outcome": outcome, **extra,
         }
         if detail:
