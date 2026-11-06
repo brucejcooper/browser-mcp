@@ -1,6 +1,7 @@
 """The tools against local pages in a real Firefox under Xvfb."""
 
 import json
+import os
 import shutil
 
 import pytest
@@ -16,9 +17,18 @@ pytestmark = [
 
 DENIED = ["127.0.0.2/32"]  # the fixtures' "private" server; 127.0.0.1 stands in for the internet
 
+# The engine the browser tests run in: firefox, or camoufox (CI runs them in each).
+ENGINE = os.environ.get("BROWSER_MCP_TEST_ENGINE", "firefox")
+
+
+def with_engine(cfg: Config) -> Config:
+    cfg.browser.engine = ENGINE
+    cfg.browser.camoufox_path = os.environ.get("BROWSER_MCP_CAMOUFOX", "")
+    return cfg
+
 
 def config(tmp_path, **limits) -> Config:
-    cfg = Config(state_dir=str(tmp_path / "state"))
+    cfg = with_engine(Config(state_dir=str(tmp_path / "state")))
     cfg.deny.networks = list(DENIED)
     cfg.limits.delay_min = cfg.limits.delay_max = 0.0
     for k, v in limits.items():
@@ -311,6 +321,6 @@ async def test_the_browser_closes_when_idle_and_keeps_the_profile(service, site,
         if not svc.browser.running:
             break
     assert not svc.browser.running
-    assert (tmp_path / "state" / "profile" / "prefs.js").exists()
+    assert (svc.browser.profile / "prefs.js").exists()
     await svc.browse(site.base + "/", "t")
     assert svc.browser.running

@@ -19,7 +19,8 @@ stock), a few pages at a time.
 
 It runs over stdio (for a local Claude Code) or streamable HTTP. It is packaged
 from one Nix flake as a NixOS module and as a Docker image for `linux/amd64`
-and `linux/arm64`. Both use the same Firefox build.
+and `linux/arm64`. Both have the same two engines: Playwright's Firefox (the
+default) and [Camoufox](#camoufox).
 
 **Contents:** [Tools](#tools) · [Running it](#running-it) ·
 [Configuration](#configuration) · [Challenges](#challenges) · [Proxy and CA](#behind-a-proxy-and-a-tls-inspecting-ca) ·
@@ -154,6 +155,7 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 |---|---|---|
 | `state_dir` | `./state` | The browser profile (cookies, history) and the limits' counters. `--state-dir`, `BROWSER_MCP_STATE_DIR`. |
 | `transport` | `stdio` | `stdio` or `http`. `--transport`. |
+| `browser.engine` | `firefox` | The browser: `firefox` (Playwright's) or `camoufox` ([Camoufox](#camoufox)). Each has a profile of its own in `state_dir`. Not to be confused with `engines`, the search engines. |
 | `browser.locale` | `en-US` | The browser's locale: `navigator.languages` and Accept-Language are it and its language (`en-AU, en`), and `Intl` follows it (Firefox's `LANG`). |
 | `browser.timezone` | the host's | An IANA zone, e.g. `Europe/Berlin`. |
 | `browser.screen_width`, `screen_height` | 1920, 1080 | The virtual screen, and the window's size. |
@@ -161,7 +163,9 @@ defaults. Unknown settings are an error, so a typo doesn't pass silently.
 | `browser.display` | (own Xvfb) | An X display to use instead of the server's own Xvfb. |
 | `browser.navigation_timeout` | 45 | Seconds a page may take to load. |
 | `browser.challenge_wait`, `checkbox_wait` | 25, 15 | Seconds to wait out an interstitial, and for a clicked checkbox to clear. |
-| `browser.firefox_prefs` | `{}` | Extra Firefox prefs. |
+| `browser.firefox_prefs` | `{}` | Extra Firefox prefs (either engine). |
+| `browser.camoufox_config` | `{}` | Camoufox only: [its properties](https://github.com/daijro/camoufox), merged over the fingerprint it is given. |
+| `browser.camoufox_path` | `BROWSER_MCP_CAMOUFOX` | Camoufox only: its executable. The Nix package and the image set it. |
 | `output.max_text`, `max_links`, `max_results` | 30000, 200, 20 | The caps on what a tool returns. |
 | `limits.delay_min`, `delay_max` | 2.0, 3.0 | Seconds between page actions, jittered. |
 | `limits.per_site_per_day` | 250 | Pages per registrable domain (`example.co.uk`) in any 24 hours. |
@@ -399,6 +403,45 @@ All of these are in code, with their values in config.
   - A widget on an ordinary page (reCAPTCHA v3, a form's hCaptcha) isn't
     treated as a challenge.
 
+### Camoufox
+
+`browser.engine = "camoufox"` runs [Camoufox](https://github.com/daijro/camoufox)
+instead: a Firefox whose fingerprint is set in the engine (C++), with its own
+Juggler for Playwright. Firefox stays the default; Camoufox is for a site that
+catches it.
+- **It is current.** Camoufox 158 has the TLS (JA3, JA4), HTTP/2 and header
+  fingerprint of a stock Firefox of today. Playwright's Firefox in nixpkgs is
+  148, months behind, and its JA4 shows it.
+- **`navigator.webdriver` is `false` in the engine**, so the page script
+  above isn't added, nor anything it leaves for a page to find.
+- **Playwright's scripts run in a world of their own**, which sees the page's
+  DOM but not its globals.
+- The rest is as above: the same prefs, profile handling, Xvfb, fonts,
+  WebGL, egress proxy, CA and limits.
+
+**Its fingerprint claims the machine it really runs on**: Linux desktop
+Firefox of Camoufox's own version, the screen of its Xvfb, the fonts of the
+package's fontconfig, the WebGL of Mesa's llvmpipe, the host's CPU count.
+None of it is spoofed, so there's nothing for a page to catch contradicting
+itself (a Windows profile over a Linux TCP stack and llvmpipe would be), and
+nothing drawn at random. What it is given (in `CAMOU_CONFIG`) is what the host
+doesn't decide: the locale and time zone from the config. It is written to
+`state_dir/camoufox-fingerprint.json` on first start and reused, so it is the
+same after a restart. When `screen_*`, `locale` or `timezone` change, it is
+made again, and the log says so. `browser.camoufox_config` goes over it, for
+anything else.
+
+The canvas is the one thing that differs from launch to launch, as in a stock
+Firefox 158: its fingerprinting protection randomises canvas readback per
+session. Camoufox keeps that, so a fingerprint ID that hashes the canvas
+(CreepJS's) changes on a restart, as a person's does.
+
+**The package** has upstream's release build for `x86_64` and `arm64`, pinned
+by hash in [`nix/camoufox.nix`](nix/camoufox.nix) and patched to run on NixOS
+with firefox-bin's libraries. The release's bundled fonts for every OS are
+left out (only Mozilla's emoji font is kept). To bump it, set the version and
+the two hashes there: each release lists its zips' sha256.
+
 ## Survey: what exists, and why this is built the way it is
 
 Done 2026-11-01. The rule was to prefer maintained work over our own code.
@@ -412,7 +455,7 @@ refused by eBay with a 403 (no `_abck` cookie).
 |---|---|---|
 | [Playwright MCP](https://github.com/microsoft/playwright-mcp) (`@playwright/mcp`) | Microsoft's MCP server over Playwright: navigate, click, type, fill forms, by the accessibility tree. | **Not used.** Its tools are exactly the general click, type and form tools this server must not have. It has no limits, egress control or challenge handling, and adding them means wrapping or forking it. We use the same engine (Playwright) underneath. |
 | [browser-use](https://github.com/browser-use/browser-use) | An agent framework: an LLM drives a Chromium browser step by step. | **Not used.** It is an agent with its own LLM loop, not a tool. It is Chromium-based, which eBay refused in the spike, and it is built to act on pages, which this is not for. |
-| [Camoufox](https://github.com/daijro/camoufox) | A Firefox with fingerprint patches in C++, driven through Playwright's API. MPL-2.0 / MIT. | **The fallback engine.** Active, but it calls itself "under development". Its binary is fetched at run time (`camoufox fetch`) and isn't in nixpkgs. Today's Firefox passes, so it isn't needed yet. If Firefox starts being caught, it slots in where the engine is launched (`browser.py`), packaged as a fixed-output fetch. |
+| [Camoufox](https://github.com/daijro/camoufox) | A Firefox with fingerprint patches in C++, driven through Playwright's API. MPL-2.0 / MIT. | **The second engine** (`browser.engine = "camoufox"`, [above](#camoufox)), since Firefox is caught by eBay's Akamai. Active, but it calls itself "under development". It isn't in nixpkgs, and its Python library fetches the binary at run time (`camoufox fetch`), so neither is used: the package pins upstream's release build as a fixed-output fetch, and the server writes the config Camoufox reads itself. |
 | [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), [nodriver](https://github.com/ultrafunkamsterdam/nodriver) | Undetected drivers for Chromium (a patched Playwright; CDP without WebDriver). | **Not used.** They are Chromium only. The spike's evidence favours Firefox against Akamai. |
 | [invisible-playwright-mcp](https://github.com/ColorSource/invisible_playwright_mcp) | An MCP server over a patched stealth Firefox, mirroring Playwright MCP's tools. | **Not used.** It has the same general click and type tool surface. It pins its own engine binary, outside nixpkgs. |
 | Human-input libraries: [ghost-cursor](https://github.com/Xetera/ghost-cursor) (JS), [python_ghost_cursor](https://github.com/mcolella14/python_ghost_cursor), [humancursor-playwright](https://pypi.org/project/humancursor-playwright/), smooth-cursor-playwright, OxyMouse | Bézier or Gaussian mouse paths, some with scrolling and clicking. | **Not used; the idea is borrowed.** ghost-cursor is for Puppeteer in JS. Its Python port was last released in 2021. The Playwright ports are single-author 0.x packages, not in nixpkgs. A dependency each for about 100 lines (`human.py`) isn't worth it, and none of them do typing rhythm or scroll-bar paging. |
@@ -452,6 +495,8 @@ nix build .#checks.x86_64-linux.module       # the NixOS module evaluates and it
   hands it to a person in the live view (the real x11vnc, and noVNC in a
   second Firefox).
 - `tests/test_proxy_ca.py` runs behind mitmproxy.
+- They run in Playwright's Firefox; `BROWSER_MCP_TEST_ENGINE=camoufox` runs
+  them in Camoufox (CI runs both).
 
 CI ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the tests
 and gitleaks, and builds the package and both images. When `main`'s version

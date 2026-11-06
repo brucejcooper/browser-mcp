@@ -1,6 +1,6 @@
-"""The engine: Firefox, headful under an Xvfb of its own, driven by Playwright,
-with one persistent profile and one tab. Started on demand; closed after an
-idle time, the profile kept."""
+"""The engine: Firefox (Playwright's, or Camoufox), headful under an Xvfb of
+its own, driven by Playwright, with one persistent profile and one tab.
+Started on demand; closed after an idle time, the profile kept."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
-from . import tls
+from . import camoufox, tls
 from .config import Config
 from .egress import EgressProxy
 
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # and errors (called on anything but a Navigator, it throws) are native; and
 # Function.prototype.toString answers for it, and for itself, as it would for
 # the originals. Still detectable in ways no page script can hide (a worker's
-# navigator, a stack trace); the engine-level fix is Camoufox.
+# navigator, a stack trace); the engine-level fix is Camoufox, which needs none.
 HIDE_WEBDRIVER = """(() => {
   const proto = Object.getPrototypeOf(navigator);
   const desc = Object.getOwnPropertyDescriptor(proto, 'webdriver');
@@ -132,7 +132,9 @@ class Browser:
     def __init__(self, cfg: Config, egress: EgressProxy):
         self.cfg = cfg
         self.egress = egress
-        self.profile = Path(cfg.state_dir) / "profile"
+        # One profile per engine: neither Firefox build gets the other's.
+        self.camoufox = cfg.browser.engine == "camoufox"
+        self.profile = Path(cfg.state_dir) / ("profile-camoufox" if self.camoufox else "profile")
         self.lock = asyncio.Lock()  # one call at a time, one tab
         self._pw: Playwright | None = None
         self._ctx: BrowserContext | None = None
@@ -181,7 +183,19 @@ class Browser:
         # package's Firefox has Juggler patched so no override is set).
         env["LANG"] = posix_locale(b.locale)
         env.pop("LC_ALL", None)
-        prefs = {**BASE_PREFS, "intl.accept_languages": accept_languages(b.locale), **b.firefox_prefs}
+        prefs = {**BASE_PREFS, "intl.accept_languages": accept_languages(b.locale)}
+        engine = {}
+        if self.camoufox:
+            # Its fingerprint, timezone included, is set in the engine.
+            if not b.camoufox_path:
+                raise RuntimeError("browser.engine is camoufox, but there's no Camoufox: set "
+                                   "browser.camoufox_path or BROWSER_MCP_CAMOUFOX (the package sets it)")
+            env.update(camoufox.env(camoufox.fingerprint(b, self.cfg.state_dir)))
+            prefs.update(camoufox.PREFS)
+            engine["executable_path"] = b.camoufox_path
+        else:
+            engine["timezone_id"] = b.timezone or None
+        prefs.update(b.firefox_prefs)
         try:
             self._ctx = await self._pw.firefox.launch_persistent_context(
                 str(self.profile),
@@ -189,7 +203,7 @@ class Browser:
                 no_viewport=not b.headless,
                 viewport={"width": b.screen_width, "height": b.screen_height - 120} if b.headless else None,
                 screen={"width": b.screen_width, "height": b.screen_height} if b.headless else None,
-                timezone_id=b.timezone or None,
+                **engine,
                 proxy={"server": f"http://127.0.0.1:{self.egress.port}"},
                 firefox_user_prefs=prefs,
                 env=env,
@@ -198,7 +212,8 @@ class Browser:
         except Exception:
             await self.close()
             raise
-        await self._ctx.add_init_script(HIDE_WEBDRIVER)
+        if not self.camoufox:
+            await self._ctx.add_init_script(HIDE_WEBDRIVER)
         self._ctx.set_default_navigation_timeout(b.navigation_timeout * 1000)
         self._ctx.set_default_timeout(15_000)
         pages = self._ctx.pages
@@ -216,7 +231,7 @@ class Browser:
             log.warning("navigator.language is 'undefined': this Firefox's Juggler isn't patched as the "
                         "package's is (nix/package.nix), so the locale override hides intl.accept_languages")
         self.current_links = set()
-        log.info("browser started (profile %s, viewport %sx%s)", self.profile, *self.viewport)
+        log.info("browser started (%s, profile %s, viewport %sx%s)", b.engine, self.profile, *self.viewport)
         if self._idle_task is None or self._idle_task.done():
             self._idle_task = asyncio.create_task(self._idle_watch())
 

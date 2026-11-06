@@ -5,6 +5,7 @@ state_dir = "./state"     # the browser profile and the limits' counters
 transport = "stdio"       # or "http"
 
 [browser]
+engine = "firefox"        # or "camoufox" (the README's "Camoufox"); not the search engines
 locale = "en-US"          # also navigator.languages and Accept-Language ("en-US, en"), and Intl
 timezone = ""             # an IANA name, e.g. "Europe/Berlin"; empty: the host's
 screen_width = 1920
@@ -14,6 +15,7 @@ display = ""              # an existing X display instead of the server's own Xv
 navigation_timeout = 45
 challenge_wait = 25       # seconds to wait out an interstitial ("Just a moment...")
 checkbox_wait = 15        # seconds for a clicked checkbox widget to clear
+camoufox_path = ""        # camoufox only: its executable; empty: BROWSER_MCP_CAMOUFOX (the package sets it)
 
 [output]
 max_text = 30000

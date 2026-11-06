@@ -2,6 +2,7 @@
 # and the Docker image both use this, so they share one fingerprint.
 {
   lib,
+  callPackage,
   python3Packages,
   playwright-driver,
   runCommand,
@@ -57,6 +58,9 @@ let
       rm -r omni
     done
   '';
+  # The other engine (browser.engine = "camoufox"), in the package too, so
+  # switching is a config change only.
+  camoufox = callPackage ./camoufox.nix { };
   fontsConf = makeFontsConf {
     fontDirectories = [
       dejavu_fonts
@@ -72,6 +76,7 @@ let
   ];
   runtimeEnv = {
     PLAYWRIGHT_BROWSERS_PATH = "${browsers}";
+    BROWSER_MCP_CAMOUFOX = "${camoufox}/${camoufox.executable}";
     # WebGL, as desktop Firefox always has it: Mesa's software renderer
     # (llvmpipe), through libglvnd, with no GPU or /dev/dri needed.
     LD_LIBRARY_PATH = lib.makeLibraryPath [
@@ -129,7 +134,7 @@ python3Packages.buildPythonApplication {
     ++ [ "--prefix PATH : ${lib.makeBinPath runtimeTools}" ];
 
   passthru = {
-    inherit browsers runtimeTools runtimeEnv;
+    inherit browsers camoufox runtimeTools runtimeEnv;
   };
 
   meta = {

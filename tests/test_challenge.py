@@ -31,8 +31,9 @@ WIDGET = """<!doctype html><body style="margin:0;background:#eef">
 <input id="answer" style="position:absolute;left:20px;top:60px;width:200px;height:30px">
 <button id="verify" style="position:absolute;left:20px;top:120px;width:100px;height:30px">Verify</button>
 <script>
-window.clicks = [];
-document.addEventListener('mousedown', e => window.clicks.push([e.clientX, e.clientY]));
+// The clicks, in the DOM: Camoufox runs Playwright's scripts in a world of
+// their own, which sees the page's DOM but not its globals.
+document.addEventListener('mousedown', e => document.body.dataset.click = [e.clientX, e.clientY]);
 document.getElementById('verify').onclick = () => {
   if (document.getElementById('answer').value === 'cat')
     parent.document.querySelector('[name="h-captcha-response"]').value = 'solved';
@@ -120,7 +121,7 @@ async def test_the_client_solves_it_inside_the_widget_only(service, site, tmp_pa
     out, _ = await svc.challenge("click", "t", x=100, y=75)
     assert out["challenge"] == "hcaptcha"
     frame = await widget_frame(svc)
-    cx, cy = (await frame.evaluate("window.clicks"))[-1]
+    cx, cy = map(float, (await frame.evaluate("document.body.dataset.click")).split(","))
     assert abs(cx - 100) <= 1 and abs(cy - 75) <= 1  # where it was asked, in the frame's own pixels
     out, _ = await svc.challenge("type", "t", text="cat")
     assert await frame.evaluate("document.getElementById('answer').value") == "cat"

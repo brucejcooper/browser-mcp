@@ -87,6 +87,7 @@ DEFAULT_ENGINES = {
 
 @dataclass
 class BrowserConfig:
+    engine: str = "firefox"  # firefox: Playwright's; camoufox: Camoufox (the package has both)
     locale: str = "en-US"
     timezone: str = ""  # empty: the host's
     screen_width: int = 1920
@@ -98,6 +99,8 @@ class BrowserConfig:
     challenge_wait: float = 25.0  # how long to wait out an interstitial
     checkbox_wait: float = 15.0  # how long a clicked checkbox has to clear
     firefox_prefs: dict[str, Any] = field(default_factory=dict)
+    camoufox_config: dict[str, Any] = field(default_factory=dict)  # merged over its fingerprint
+    camoufox_path: str = ""  # its executable; empty: BROWSER_MCP_CAMOUFOX
 
 
 @dataclass
@@ -252,6 +255,8 @@ def load(path: str | os.PathLike | None, env: dict[str, str] | None = None) -> C
         cfg.proxy.username = env["BROWSER_MCP_PROXY_USER"]
     if env.get("BROWSER_MCP_PROXY_PASSWORD_FILE"):
         cfg.proxy.password_file = env["BROWSER_MCP_PROXY_PASSWORD_FILE"]
+    if not cfg.browser.camoufox_path and env.get("BROWSER_MCP_CAMOUFOX"):
+        cfg.browser.camoufox_path = env["BROWSER_MCP_CAMOUFOX"]
     if not cfg.view.novnc_dir and env.get("BROWSER_MCP_NOVNC_DIR"):
         cfg.view.novnc_dir = env["BROWSER_MCP_NOVNC_DIR"]
     validate(cfg)
@@ -270,6 +275,11 @@ def validate(cfg: Config) -> None:
             raise ConfigError(f"sites.{name}.min_interval: must not be negative")
     if cfg.search.default not in cfg.engines:
         raise ConfigError(f"search.default: no engine {cfg.search.default!r}")
+    if cfg.browser.engine not in ("firefox", "camoufox"):
+        raise ConfigError("browser.engine: firefox or camoufox")
+    if cfg.browser.engine == "camoufox" and not cfg.browser.camoufox_path:
+        raise ConfigError("browser.engine: camoufox needs its executable (browser.camoufox_path or "
+                          "BROWSER_MCP_CAMOUFOX; the package sets it)")
     if cfg.transport not in ("stdio", "http"):
         raise ConfigError("transport: stdio or http")
     view = cfg.view

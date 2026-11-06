@@ -45,3 +45,15 @@ input = "#q"
     f.write_text('[limits]\nper_day = "many"\n')
     with pytest.raises(ConfigError, match="expected int"):
         load(f, env={})
+
+
+def test_the_engine_is_firefox_or_camoufox(tmp_path):
+    assert load(None, env={}).browser.engine == "firefox"
+    f = tmp_path / "c.toml"
+    f.write_text('[browser]\nengine = "camoufox"\n')
+    with pytest.raises(ConfigError, match="camoufox needs its executable"):
+        load(f, env={})
+    assert load(f, env={"BROWSER_MCP_CAMOUFOX": "/x/camoufox-bin"}).browser.camoufox_path == "/x/camoufox-bin"
+    f.write_text('[browser]\nengine = "chrome"\n')
+    with pytest.raises(ConfigError, match="firefox or camoufox"):
+        load(f, env={})

@@ -22,6 +22,8 @@ jobs:
         run: nix build -L --no-link .#packages.x86_64-linux.default .#checks.x86_64-linux.module
       - name: All the tests, the browser ones too (Firefox under Xvfb, mitmproxy)
         run: nix develop -c python -m pytest -q -m "not live"
+      - name: The browser tests again, in Camoufox
+        run: BROWSER_MCP_TEST_ENGINE=camoufox nix develop -c python -m pytest -q -m "browser and not live"
 
   gitleaks:
     if: github.ref == 'refs/heads/main'
@@ -38,7 +40,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       # aarch64 builds under QEMU on the runner; Firefox and Python come
-      # prebuilt from cache.nixos.org.
+      # prebuilt from cache.nixos.org, Camoufox from its release page.
       - run: nix build -L --no-link .#packages.x86_64-linux.image .#packages.aarch64-linux.image
 
   release:

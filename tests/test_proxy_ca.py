@@ -20,6 +20,7 @@ from browser_mcp.cli import configure, parse_args
 from browser_mcp.config import Engine
 from browser_mcp.server import build
 from browser_mcp.tools import ToolRefused
+from test_browser import with_engine
 
 pytestmark = [
     pytest.mark.browser,
@@ -110,6 +111,7 @@ def origin(tmp_path_factory):
 
 
 def settings(cfg, origin):
+    with_engine(cfg)
     cfg.deny.networks = []  # everything here is on loopback
     cfg.limits.delay_min = cfg.limits.delay_max = 0
     cfg.engines["local"] = Engine(url=origin.base + "/engine", input='input[name="q"]', result="div.r",
